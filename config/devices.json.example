@@ -1,0 +1,27 @@
+{
+  "defaultDeviceId": "local-pc",
+  "devices": [
+    {
+      "deviceId": "local-pc",
+      "name": "CONTROLLER-PC",
+      "enabled": true,
+      "local": true,
+      "token": "replace-with-a-random-token-at-least-32-characters",
+      "notes": "Controller host; native Windows Desktop Commander"
+    },
+    {
+      "deviceId": "remote-worker",
+      "name": "REMOTE-WORKER",
+      "enabled": true,
+      "local": false,
+      "tailscaleIp": "100.64.0.2",
+      "notes": "Docker worker; /host read-only and /workspace read-write",
+      "pathMappings": [
+        {
+          "from": "C:\\",
+          "to": "/host"
+        }
+      ]
+    }
+  ]
+}

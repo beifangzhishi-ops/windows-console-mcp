@@ -1,0 +1,20 @@
+{
+  "name": "windows-console-mcp",
+  "version": "1.1.2",
+  "private": true,
+  "license": "MIT",
+  "description": "Multi-device Windows Console MCP controller and worker gateway for ChatGPT over Tailscale.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node scripts/test-rdc-e2e.mjs && node scripts/test-rdc-modern-e2e.mjs && node scripts/test-rpc-concurrency.mjs",
+    "test:legacy": "node scripts/test-rdc-e2e.mjs",
+    "test:modern": "node scripts/test-rdc-modern-e2e.mjs",
+    "test:concurrency": "node scripts/test-rpc-concurrency.mjs"
+  },
+  "dependencies": {
+    "@wonderwhy-er/desktop-commander": "0.2.48"
+  }
+}

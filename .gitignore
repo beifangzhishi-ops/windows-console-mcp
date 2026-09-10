@@ -1,0 +1,12 @@
+node_modules/
+.state/
+logs/
+config/rdc.env
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+config/devices.json
+config/worker-*.env
+worker.env
+worker/worker.env
