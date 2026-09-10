@@ -6,6 +6,13 @@ export const OAUTH_SCOPE = 'mcp';
 const STATE_VERSION = 1;
 const CODE_TTL_SECONDS = 600;
 const REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
+const CLIENT_TTL_SECONDS = 180 * 24 * 60 * 60;
+const MAX_REGISTERED_CLIENTS = 256;
+
+export const OAUTH_POLICY = Object.freeze({
+  clientTtlSeconds: CLIENT_TTL_SECONDS,
+  maxRegisteredClients: MAX_REGISTERED_CLIENTS,
+});
 
 export class OAuthError extends Error {
   constructor(code, description, status = 400) {
@@ -68,8 +75,19 @@ function validateRedirectUris(redirectUris) {
     } catch {
       throw new OAuthError('invalid_redirect_uri', 'redirect_uris contains an invalid URI.');
     }
-    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.hash) {
+    if (
+      !['http:', 'https:'].includes(parsed.protocol) ||
+      parsed.hash ||
+      parsed.username ||
+      parsed.password
+    ) {
       throw new OAuthError('invalid_redirect_uri', 'redirect_uris contains an invalid URI.');
+    }
+    if (
+      parsed.protocol === 'http:' &&
+      !['127.0.0.1', 'localhost', '[::1]'].includes(parsed.hostname)
+    ) {
+      throw new OAuthError('invalid_redirect_uri', 'HTTP redirect_uris must use a loopback host.');
     }
     if (!uniqueUris.includes(redirectUri)) {
       uniqueUris.push(redirectUri);
@@ -93,6 +111,7 @@ export class OAuthStore {
     this.stateFile = stateFile;
     this.clock = clock;
     this.state = this.load();
+    if (this.pruneExpired()) this.save();
   }
 
   load() {
@@ -131,9 +150,48 @@ export class OAuthStore {
     fs.renameSync(temporaryFile, this.stateFile);
   }
 
+  pruneExpired(now = this.clock()) {
+    let changed = false;
+    for (const bucketName of ['authorizationCodes', 'accessTokens', 'refreshTokens']) {
+      const bucket = this.state[bucketName];
+      for (const [key, record] of Object.entries(bucket)) {
+        if (!record || !Number.isFinite(record.expiresAt) || record.expiresAt <= now) {
+          delete bucket[key];
+          changed = true;
+        }
+      }
+    }
+    const activeClientIds = new Set();
+    for (const bucketName of ['authorizationCodes', 'accessTokens', 'refreshTokens']) {
+      for (const record of Object.values(this.state[bucketName])) {
+        if (record?.clientId) activeClientIds.add(record.clientId);
+      }
+    }
+    const staleBefore = now - CLIENT_TTL_SECONDS * 1000;
+    for (const [clientId, client] of Object.entries(this.state.clients)) {
+      if (!activeClientIds.has(clientId) && Number(client?.createdAt || 0) <= staleBefore) {
+        delete this.state.clients[clientId];
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  pruneAndSave() {
+    if (this.pruneExpired()) this.save();
+  }
+
   registerClient(metadata) {
+    this.pruneAndSave();
     if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
       throw new OAuthError('invalid_client_metadata', 'Client metadata must be a JSON object.');
+    }
+    if (Object.keys(this.state.clients).length >= MAX_REGISTERED_CLIENTS) {
+      throw new OAuthError(
+        'temporarily_unavailable',
+        'Client registration limit reached; remove stale clients or retry later.',
+        429,
+      );
     }
     const redirectUris = validateRedirectUris(metadata.redirect_uris);
     const grantTypes = Array.isArray(metadata.grant_types)
@@ -183,6 +241,7 @@ export class OAuthStore {
   }
 
   getClient(clientId) {
+    this.pruneAndSave();
     const client = this.state.clients[clientId];
     return client ? clone(client) : null;
   }
@@ -195,6 +254,7 @@ export class OAuthStore {
     resource,
     scope,
   }) {
+    this.pruneAndSave();
     const code = createOpaqueValue('rdc_code_');
     const now = this.clock();
     this.state.authorizationCodes[hashOpaqueValue(code)] = {
@@ -212,6 +272,7 @@ export class OAuthStore {
   }
 
   mintTokenPair({ clientId, resource, scope, tokenTtlSeconds, familyId = null }) {
+    this.pruneAndSave();
     const accessToken = createOpaqueValue('rdc_at_');
     const refreshToken = createOpaqueValue('rdc_rt_');
     const tokenFamilyId = familyId || createOpaqueValue('rdc_family_');
@@ -250,6 +311,7 @@ export class OAuthStore {
     resource,
     tokenTtlSeconds,
   }) {
+    this.pruneAndSave();
     if (typeof code !== 'string' || typeof codeVerifier !== 'string') {
       throw new OAuthError('invalid_grant', 'Authorization code or verifier is invalid.');
     }
@@ -282,6 +344,7 @@ export class OAuthStore {
   }
 
   exchangeRefreshToken({ refreshToken, clientId, resource, scope, tokenTtlSeconds }) {
+    this.pruneAndSave();
     if (typeof refreshToken !== 'string' || !refreshToken) {
       throw new OAuthError('invalid_grant', 'Refresh token is invalid or expired.');
     }
@@ -317,6 +380,7 @@ export class OAuthStore {
   }
 
   validateAccessToken(accessToken, resource) {
+    this.pruneAndSave();
     if (typeof accessToken !== 'string' || !accessToken) {
       return null;
     }
@@ -337,6 +401,7 @@ export class OAuthStore {
   }
 
   revokeToken(token) {
+    this.pruneAndSave();
     if (typeof token !== 'string' || !token) {
       return false;
     }

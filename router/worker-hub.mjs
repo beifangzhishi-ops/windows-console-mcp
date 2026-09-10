@@ -5,6 +5,7 @@ import { equalToken } from './devices.mjs';
 const MAX_FRAME_BYTES = 8 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 120000;
 const HELLO_TIMEOUT_MS = 10000;
+const STALE_CONNECTION_MS = 45000;
 
 function encodeFrame(value) {
   return JSON.stringify(value) + '\n';
@@ -48,6 +49,7 @@ export class WorkerHub {
     port = 18101,
     remoteHost = '',
     remotePort = 18100,
+    staleConnectionMs = STALE_CONNECTION_MS,
     logger = console,
   } = {}) {
     this.registry = registry;
@@ -55,6 +57,7 @@ export class WorkerHub {
     this.port = port;
     this.remoteHost = remoteHost;
     this.remotePort = remotePort;
+    this.staleConnectionMs = staleConnectionMs;
     this.logger = logger;
     this.localServer = null;
     this.remoteServer = null;
@@ -244,8 +247,14 @@ export class WorkerHub {
   }
 
   pingAll() {
+    const now = Date.now();
     for (const state of this.connections.values()) {
-      try { state.socket.write(encodeFrame({ type: 'ping', at: Date.now() })); }
+      if (now - state.lastSeen > this.staleConnectionMs) {
+        this.logger.error(`Worker heartbeat stale: ${state.deviceId}; lastSeenMs=${now - state.lastSeen}`);
+        safeDestroy(state.socket);
+        continue;
+      }
+      try { state.socket.write(encodeFrame({ type: 'ping', at: now })); }
       catch { safeDestroy(state.socket); }
     }
   }

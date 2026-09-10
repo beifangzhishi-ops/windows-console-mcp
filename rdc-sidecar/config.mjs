@@ -51,14 +51,6 @@ function requireInteger(name, value, minimum, maximum) {
   return parsed;
 }
 
-function requireBoolean(name, value) {
-  if (typeof value === 'boolean') return value;
-  const normalized = String(value ?? '').trim().toLowerCase();
-  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
-  if (['0', 'false', 'no', 'off', ''].includes(normalized)) return false;
-  throw new Error(name + ' must be a boolean value.');
-}
-
 function normalizeUpstreamUrl(value) {
   let upstream;
   try {
@@ -110,8 +102,6 @@ export function createConfig(options = {}) {
     resource,
     stateFile,
     upstreamSessionFile,
-    workspaceMode,
-    workspaceStateFile,
     approvalSecretFile,
     logDir,
     tokenTtlSeconds,
@@ -165,13 +155,6 @@ export function createConfig(options = {}) {
     86400,
   );
 
-  const selectedWorkspaceMode = requireBoolean(
-    'RDC_WORKSPACE_MODE',
-    workspaceMode ?? values.RDC_WORKSPACE_MODE ?? false,
-  );
-  if (selectedWorkspaceMode) {
-    throw new Error('RDC_WORKSPACE_MODE must remain disabled.');
-  }
 
   const selectedStateFile = resolveFromRoot(
     rootDir,
@@ -182,10 +165,6 @@ export function createConfig(options = {}) {
     upstreamSessionFile ??
       values.RDC_UPSTREAM_SESSION_FILE ??
       '.state/rdc-upstream-session.json',
-  );
-  const selectedWorkspaceStateFile = resolveFromRoot(
-    rootDir,
-    workspaceStateFile ?? values.RDC_WORKSPACE_STATE_FILE ?? '.state/rdc-workspace.json',
   );
   const selectedApprovalSecretFile = resolveFromRoot(
     rootDir,
@@ -206,8 +185,6 @@ export function createConfig(options = {}) {
     authorizationServerMetadataUrl: wellKnownUrl(selectedIssuer, 'oauth-authorization-server'),
     stateFile: selectedStateFile,
     upstreamSessionFile: selectedUpstreamSessionFile,
-    workspaceMode: selectedWorkspaceMode,
-    workspaceStateFile: selectedWorkspaceStateFile,
     approvalSecretFile: selectedApprovalSecretFile,
     logDir: selectedLogDir,
     tokenTtlSeconds: selectedTtl,

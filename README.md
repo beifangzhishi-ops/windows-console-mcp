@@ -63,12 +63,15 @@ npm test
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\rdc-status.ps1
 ```
 
-`npm test` runs both:
+`npm test` is self-contained: it uses temporary state and does not require or modify a live deployment. It covers OAuth state pruning/caps, worker heartbeat expiry, and reconnect isolation.
 
-```text
-legacy OAuth + stateful MCP E2E
-MCP 2026-07-28 server/discover + stateless routing E2E
+To exercise an already configured live controller and sidecar, run:
+
+```powershell
+npm run test:live
 ```
+
+The live suite covers legacy OAuth/stateful MCP, MCP `2026-07-28`, device routing, resources, and duplicate external JSON-RPC IDs. It uses the configured OAuth deployment and can register test clients, so it is intentionally separate from the default CI test.
 
 The public endpoint is configured by `RDC_RESOURCE`. With a Tailscale Funnel hostname it typically looks like:
 

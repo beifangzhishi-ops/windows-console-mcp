@@ -6,8 +6,7 @@ param(
     [string]$DeviceName='',
     [string]$WorkspaceRoot='',
     [string]$ContainerName='windows-console-worker',
-    [string]$ExistingRdcContainer='dc-remote-readonly',
-    [string]$Image='node:22'
+    [string]$Image='node:22.23.2-bookworm'
 )
 $ErrorActionPreference='Stop'
 $workerDir=$PSScriptRoot
@@ -38,11 +37,6 @@ $envText=@(
 
 $existing=& $docker ps -a --filter "name=^/$ContainerName$" --format '{{.Names}}'
 if($existing -eq $ContainerName){ & $docker rm -f $ContainerName | Out-Null }
-$rdc=& $docker ps --filter "name=^/$ExistingRdcContainer$" --format '{{.Names}}'
-if($rdc -eq $ExistingRdcContainer){
-    & $docker exec $ExistingRdcContainer sh -lc "pkill -f '[n]ode agent.mjs worker.env' || true" 2>$null | Out-Null
-}
-
 $args=@(
     'run','-d','--name',$ContainerName,'--restart','unless-stopped',
     '--mount',"type=bind,source=$workerDir,target=/app",

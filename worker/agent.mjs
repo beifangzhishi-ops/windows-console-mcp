@@ -160,6 +160,7 @@ function connectController() {
   socket.on('close', () => {
     if (connected) console.log('Controller connection lost for ' + deviceId + '.');
     connected = false;
+    pendingByRpcId.clear();
     socket = null;
     if (!stopping) setTimeout(connectController, reconnectMs);
   });

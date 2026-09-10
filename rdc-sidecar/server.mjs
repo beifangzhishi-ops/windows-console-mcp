@@ -1,12 +1,9 @@
 import fs from 'node:fs';
-import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { promisify } from 'node:util';
 import { loadConfig } from './config.mjs';
-import { BrowserWorkspaceRouter } from './workspace.mjs';
 import {
   OAuthError,
   OAuthStore,
@@ -15,12 +12,10 @@ import {
   createPkceChallenge,
 } from './oauth.mjs';
 
-const execFileAsync = promisify(execFile);
 const MAX_BODY_BYTES = 1024 * 1024;
 const UPSTREAM_TIMEOUT_MS = 120000;
 const MAX_UPSTREAM_RESPONSE_BYTES = 8 * 1024 * 1024;
 const MCP_SESSION_HEADER = 'mcp-session-id';
-const WORKSPACE_BOOTSTRAP_PATH = '/workspace-bootstrap';
 const REQUEST_HOP_HEADERS = new Set([
   'connection',
   'keep-alive',
@@ -49,6 +44,8 @@ const REGISTER_PATH = '/rdc/register';
 const REVOKE_PATH = '/rdc/revoke';
 const CONSENT_PATH = '/rdc/oauth/consent';
 const MCP_PATH = '/rdc/mcp';
+const REGISTRATION_WINDOW_MS = 10 * 60 * 1000;
+const REGISTRATION_MAX_ATTEMPTS = 20;
 const AUTHORIZATION_DISCOVERY_PATHS = new Set([
   '/.well-known/oauth-authorization-server/rdc',
   '/rdc/.well-known/oauth-authorization-server',
@@ -57,59 +54,6 @@ const RESOURCE_DISCOVERY_PATHS = new Set([
   '/.well-known/oauth-protected-resource/rdc/mcp',
   '/rdc/mcp/.well-known/oauth-protected-resource',
 ]);
-
-const WORKSPACE_LOCAL_TOOLS = [
-  {
-    name: 'rdc_show_workspace',
-    description:
-      'Bring the dedicated RDC Edge workspace to the foreground for manual login, QR scan, CAPTCHA, or verification. Only the tracked GPT workspace window is affected.',
-    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-  },
-  {
-    name: 'rdc_hide_workspace',
-    description:
-      'Return the dedicated RDC Edge workspace to hidden off-screen background mode after manual interaction. Only the tracked GPT workspace window is affected.',
-    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-  },
-];
-const WORKSPACE_SUPPLEMENTAL_UPSTREAM_TOOLS = [
-  {
-    name: 'chrome_upload_file',
-    description:
-      'Upload a local, URL, or base64-backed file directly into an input[type=file] in the dedicated RDC workspace via CDP, bypassing the Windows file picker.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        selector: { type: 'string', description: 'CSS selector for input[type=file]' },
-        filePath: { type: 'string', description: 'Absolute local file path on the RDC Windows machine' },
-        fileUrl: { type: 'string', description: 'URL to download to a temporary local file before upload' },
-        base64Data: { type: 'string', description: 'Base64-encoded file data to upload' },
-        fileName: { type: 'string', description: 'Filename for URL/base64 uploads' },
-        multiple: { type: 'boolean', description: 'Whether the input accepts multiple files' },
-      },
-      required: ['selector'],
-    },
-  },
-  {
-    name: 'chrome_handle_download',
-    description:
-      'Wait for a browser-managed download and return its local filename, URL, state, and size.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        filenameContains: { type: 'string', description: 'Filter by filename or URL substring' },
-        timeoutMs: { type: 'number', description: 'Timeout in milliseconds (default 60000, max 300000)' },
-        waitForComplete: { type: 'boolean', description: 'Wait until the download completes (default true)' },
-      },
-      required: [],
-    },
-  },
-];
-const WORKSPACE_ADDITIONAL_TOOLS = [
-  ...WORKSPACE_LOCAL_TOOLS,
-  ...WORKSPACE_SUPPLEMENTAL_UPSTREAM_TOOLS,
-];
-const WORKSPACE_LOCAL_TOOL_NAMES = new Set(WORKSPACE_LOCAL_TOOLS.map((tool) => tool.name));
 
 function logMessage(logger, method, message) {
   if (logger && typeof logger[method] === 'function') {
@@ -193,6 +137,18 @@ function getContentType(request) {
     .split(';', 1)[0]
     .trim()
     .toLowerCase();
+}
+
+function consumeRegistrationBudget(request, runtime) {
+  const now = Date.now();
+  const key = String(request.socket?.remoteAddress || 'unknown');
+  const recent = (runtime.registrationAttempts.get(key) || [])
+    .filter((timestamp) => now - timestamp < REGISTRATION_WINDOW_MS);
+  if (recent.length >= REGISTRATION_MAX_ATTEMPTS) {
+    throw new OAuthError('temporarily_unavailable', 'Too many client registration attempts.', 429);
+  }
+  recent.push(now);
+  runtime.registrationAttempts.set(key, recent);
 }
 
 async function readJson(request) {
@@ -481,6 +437,7 @@ async function handleRegistration(request, response, runtime) {
     return;
   }
   try {
+    consumeRegistrationBudget(request, runtime);
     const metadata = await readJson(request);
     const client = runtime.store.registerClient(metadata);
     sendJson(
@@ -581,74 +538,6 @@ async function handleRevocation(request, response, runtime) {
   } catch (error) {
     sendOAuthError(response, error);
   }
-}
-
-async function placeWorkspaceWindowOffscreen(rootDir, nonce) {
-  const script = path.join(rootDir, 'scripts', 'place-workspace-window-offscreen.ps1');
-  const result = await execFileAsync(
-    'powershell.exe',
-    ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-Nonce', nonce],
-    { cwd: rootDir, windowsHide: true, timeout: 10000 },
-  );
-  const lines = String(result.stdout || '').trim().split(/\r?\n/u).filter(Boolean);
-  const placement = JSON.parse(lines.at(-1) || '{}');
-  if (!Number.isInteger(placement.hwnd) || placement.hwnd <= 0) {
-    throw new Error('RDC workspace HWND was not returned by the window helper.');
-  }
-  return placement;
-}
-
-function parseWindowHelperResult(stdout) {
-  const lines = String(stdout || '').trim().split(/\r?\n/u).filter(Boolean);
-  const result = JSON.parse(lines.at(-1) || '{}');
-  if (!Number.isInteger(result.hwnd) || result.hwnd <= 0) {
-    throw new Error('RDC workspace HWND helper returned an invalid result.');
-  }
-  return result;
-}
-
-async function ensureWorkspaceWindowHidden(rootDir, hwnd) {
-  if (!Number.isInteger(hwnd) || hwnd <= 0) {
-    throw new Error('RDC workspace HWND is invalid.');
-  }
-  const script = path.join(rootDir, 'scripts', 'place-workspace-window-offscreen.ps1');
-  const result = await execFileAsync(
-    'powershell.exe',
-    ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-TargetHwnd', String(hwnd)],
-    { cwd: rootDir, windowsHide: true, timeout: 10000 },
-  );
-  return { ...parseWindowHelperResult(result.stdout), hidden: true };
-}
-
-async function showWorkspaceWindow(rootDir, hwnd) {
-  if (!Number.isInteger(hwnd) || hwnd <= 0) {
-    throw new Error('RDC workspace HWND is invalid.');
-  }
-  const script = path.join(rootDir, 'scripts', 'show-workspace-window.ps1');
-  const result = await execFileAsync(
-    'powershell.exe',
-    ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-TargetHwnd', String(hwnd)],
-    { cwd: rootDir, windowsHide: true, timeout: 10000 },
-  );
-  return parseWindowHelperResult(result.stdout);
-}
-
-function sendWorkspaceBootstrap(response, nonce) {
-  if (!/^[A-Za-z0-9._-]{1,100}$/u.test(nonce)) {
-    sendJson(response, 400, { error: 'invalid_workspace_nonce' }, { noStore: true });
-    return;
-  }
-  const title = 'RDC GPT Workspace ' + nonce;
-  response.statusCode = 200;
-  response.setHeader('Content-Type', 'text/html; charset=utf-8');
-  response.setHeader('Cache-Control', 'no-store');
-  response.setHeader('X-Content-Type-Options', 'nosniff');
-  response.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'");
-  response.end(
-    '<!doctype html><meta charset="utf-8"><title>' +
-      title +
-      '</title><style>body{font-family:system-ui;margin:2rem}</style><p>RDC GPT workspace</p>',
-  );
 }
 
 function getUpstreamRequestPath(runtime, url) {
@@ -762,62 +651,6 @@ function parseUpstreamMessage(body) {
   } catch {
     return null;
   }
-}
-
-function augmentWorkspaceTools(upstreamResponse, enabled) {
-  if (!enabled || upstreamResponse.statusCode !== 200) return upstreamResponse;
-  const message = parseUpstreamMessage(upstreamResponse.body);
-  if (!Array.isArray(message?.result?.tools)) return upstreamResponse;
-  const existing = new Set(message.result.tools.map((tool) => tool?.name));
-  message.result.tools = [
-    ...message.result.tools,
-    ...WORKSPACE_ADDITIONAL_TOOLS.filter((tool) => !existing.has(tool.name)),
-  ];
-  const headers = { ...(upstreamResponse.headers || {}) };
-  delete headers['content-length'];
-  return {
-    ...upstreamResponse,
-    headers,
-    body: Buffer.from('event: message\ndata: ' + JSON.stringify(message) + '\n\n', 'utf8'),
-  };
-}
-
-function sendLocalToolResult(response, payload, data, isError, sessionId) {
-  const message = {
-    jsonrpc: '2.0',
-    id: payload.id,
-    result: {
-      content: [{ type: 'text', text: JSON.stringify(data) }],
-      isError: isError === true,
-    },
-  };
-  response.statusCode = 200;
-  response.setHeader('Content-Type', 'text/event-stream');
-  response.setHeader('Cache-Control', 'no-cache');
-  response.setHeader('X-Content-Type-Options', 'nosniff');
-  if (sessionId) response.setHeader('Mcp-Session-Id', sessionId);
-  response.end('event: message\ndata: ' + JSON.stringify(message) + '\n\n');
-}
-
-async function handleWorkspaceLocalTool(response, payload, runtime) {
-  const name = payload?.params?.name;
-  if (!WORKSPACE_LOCAL_TOOL_NAMES.has(name)) return false;
-  try {
-    const result =
-      name === 'rdc_show_workspace'
-        ? await runtime.workspace.showWorkspace()
-        : await runtime.workspace.hideWorkspace();
-    sendLocalToolResult(response, payload, { success: true, ...result }, false, runtime.upstreamSession.sessionId);
-  } catch (error) {
-    sendLocalToolResult(
-      response,
-      payload,
-      { success: false, error: String(error?.message || 'workspace control failed') },
-      true,
-      runtime.upstreamSession.sessionId,
-    );
-  }
-  return true;
 }
 
 function sendCachedInitialize(response, requestPayload, session) {
@@ -1023,31 +856,6 @@ class UpstreamSessionManager {
     return response;
   }
 
-  async callTool(name, args = {}) {
-    const payload = {
-      jsonrpc: '2.0',
-      id: `rdc-workspace-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-      method: 'tools/call',
-      params: { name, arguments: args },
-    };
-    const body = JSON.stringify(payload);
-    const response = await this.request(
-      {
-        'content-type': 'application/json',
-        accept: 'application/json, text/event-stream',
-      },
-      new URL(MCP_PATH, 'http://127.0.0.1'),
-      body,
-    );
-    if (response.statusCode !== 200) {
-      throw new UpstreamHttpError('Upstream internal tool call failed.', response);
-    }
-    const message = parseUpstreamMessage(response.body);
-    if (!message || message.error) {
-      throw new Error('Upstream internal tool call returned an invalid response.');
-    }
-    return message;
-  }
 
   async close() {
     if (this.initializing) {
@@ -1159,36 +967,12 @@ async function handleProtectedMcp(request, response, runtime, url) {
       sendCachedInitialize(response, payload, initialized);
       return;
     }
-    if (
-      payload?.method === 'tools/call' &&
-      runtime.workspace?.enabled &&
-      WORKSPACE_LOCAL_TOOL_NAMES.has(payload.params?.name)
-    ) {
-      await handleWorkspaceLocalTool(response, payload, runtime);
-      return;
-    }
-    let forwardedPayload = payload;
-    let forwardedBody = body;
-    if (payload && payload.method === 'tools/call' && runtime.workspace) {
-      forwardedPayload = await runtime.workspace.rewrite(payload);
-      forwardedBody = JSON.stringify(forwardedPayload);
-    }
     const upstreamResponse = await runtime.upstreamSession.request(
       request.headers,
       url,
-      forwardedBody,
+      body,
     );
-    if (runtime.workspace && forwardedPayload?.method === 'tools/call') {
-      await runtime.workspace.observe(
-        forwardedPayload,
-        parseUpstreamMessage(upstreamResponse.body),
-      );
-    }
-    const responseToSend =
-      payload?.method === 'tools/list'
-        ? augmentWorkspaceTools(upstreamResponse, runtime.workspace?.enabled === true)
-        : upstreamResponse;
-    sendUpstreamResponse(response, responseToSend);
+    sendUpstreamResponse(response, upstreamResponse);
   } catch (error) {
     if (error instanceof UpstreamHttpError) {
       sendUpstreamResponse(response, error.response);
@@ -1213,10 +997,6 @@ async function handleRequest(request, response, runtime) {
     setCors(response);
     response.statusCode = 204;
     response.end();
-    return;
-  }
-  if (url.pathname === WORKSPACE_BOOTSTRAP_PATH && request.method === 'GET') {
-    sendWorkspaceBootstrap(response, url.searchParams.get('nonce') || '');
     return;
   }
   if (url.pathname === '/health' && request.method === 'GET') {
@@ -1298,20 +1078,10 @@ export function createRdcServer(options = {}) {
     upstreamUrl,
     approvalSecret,
     upstreamSession: null,
-    workspace: null,
+    registrationAttempts: new Map(),
     server: null,
   };
   runtime.upstreamSession = new UpstreamSessionManager(runtime);
-  runtime.workspace = new BrowserWorkspaceRouter({
-    enabled: config.workspaceMode,
-    stateFile: config.workspaceStateFile,
-    logger,
-    bootstrapUrl: `http://localhost:${config.port}${WORKSPACE_BOOTSTRAP_PATH}`,
-    placeWindowOffscreen: (nonce) => placeWorkspaceWindowOffscreen(config.rootDir, nonce),
-    ensureWindowHidden: (hwnd) => ensureWorkspaceWindowHidden(config.rootDir, hwnd),
-    showWindow: (hwnd) => showWorkspaceWindow(config.rootDir, hwnd),
-    callTool: (name, args) => runtime.upstreamSession.callTool(name, args),
-  });
   const server = http.createServer((request, response) => {
     const requestPath = new URL(request.url || '/', 'http://127.0.0.1').pathname;
     response.on('finish', () => appendHttpTrace(runtime, 'HTTP ' + request.method + ' ' + requestPath + ' status=' + response.statusCode));
@@ -1394,6 +1164,3 @@ if (currentFile === invokedFile) {
     process.exitCode = 1;
   });
 }
-
-export const workspaceLocalToolsForTest = WORKSPACE_LOCAL_TOOLS;
-export const workspaceSupplementalToolsForTest = WORKSPACE_SUPPLEMENTAL_UPSTREAM_TOOLS;
