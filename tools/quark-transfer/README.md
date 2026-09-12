@@ -1,6 +1,6 @@
 # Quark 后台上传工具
 
-入口：`cloud-transfer.cmd`
+入口：`cloud-transfer.cmd`；WCM/PowerShell 调用建议使用 `cloud-transfer.ps1`。
 
 要求：Windows 版夸克网盘正在运行并已登录。工具只使用本机客户端已建立的登录状态；账号映射、WSG 数据和请求密文只在内存中使用，不写入工具配置，也不输出。
 
