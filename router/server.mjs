@@ -4,6 +4,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { loadDeviceRegistry } from './devices.mjs';
 import { WorkerHub } from './worker-hub.mjs';
+import { classifyToolResult, WCM_ERROR_SEMANTICS } from './error-classification.mjs';
 
 const ROUTER_HOST = process.env.WC_ROUTER_HOST || '127.0.0.1';
 const ROUTER_PORT = Number(process.env.WC_ROUTER_PORT || 18009);
@@ -212,14 +213,17 @@ function augmentTools(tools) {
       deviceId: toolDeviceSchema(),
     };
     inputSchema.required = Array.from(new Set([...(inputSchema.required || []), 'deviceId']));
-    return { ...baseTool, inputSchema };
+    const description = typeof baseTool.description === 'string'
+      ? `${baseTool.description}\n\n${WCM_ERROR_SEMANTICS}`
+      : WCM_ERROR_SEMANTICS;
+    return { ...baseTool, description, inputSchema };
   });
   const plainAliases = [];
   const readFileTool = routed.find((tool) => tool?.name === 'read_file');
   if (readFileTool) {
     const alias = structuredClone(readFileTool);
     alias.name = 'read_file_plain';
-    alias.description = 'Read file contents without any embedded UI template metadata.';
+    alias.description = `Read file contents without any embedded UI template metadata.\n\n${WCM_ERROR_SEMANTICS}`;
     delete alias._meta;
     plainAliases.push(alias);
   }
@@ -235,10 +239,10 @@ function augmentTools(tools) {
 }
 
 function toolResult(data, isError = false) {
-  return {
+  return classifyToolResult({
     content: [{ type: 'text', text: typeof data === 'string' ? data : JSON.stringify(data) }],
     isError,
-  };
+  });
 }
 
 async function listTools(sourcePayload = null) {
@@ -296,7 +300,7 @@ async function executeTool(payload, sourcePayload = null) {
     if (message.error) {
       return toolResult({ deviceId: device.deviceId, upstreamError: message.error }, true);
     }
-    return message.result || toolResult({ error: 'Worker returned no tool result.' }, true);
+    return classifyToolResult(message.result || toolResult({ error: 'Worker returned no tool result.' }, true));
   } catch (error) {
     return toolResult({
       deviceId: device.deviceId,
@@ -312,7 +316,7 @@ function modernDiscovery(id) {
     result: modernResult({
       supportedVersions: [MODERN_PROTOCOL],
       capabilities: { tools: { listChanged: true }, resources: {} },
-      instructions: 'Call list_devices first. Every Desktop Commander tool requires an explicit deviceId.',
+      instructions: `Call list_devices first. Every Desktop Commander tool requires an explicit deviceId. ${WCM_ERROR_SEMANTICS}`,
       ttlMs: 5000,
       cacheScope: 'private',
     }),

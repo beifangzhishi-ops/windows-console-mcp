@@ -13,6 +13,7 @@ import {
   createPkceChallenge,
 } from '../rdc-sidecar/oauth.mjs';
 import { WorkerHub } from '../router/worker-hub.mjs';
+import { classifyToolResult, WCM_ERROR_SEMANTICS } from '../router/error-classification.mjs';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wcm-test-'));
@@ -270,8 +271,32 @@ lines.on('line', (line) => {
   }
   if (stderr.trim()) throw new Error('Worker test stderr: ' + stderr.trim());
 }
+function testErrorClassification() {
+  const ordinary = classifyToolResult({ content: [{ type: 'text', text: 'Error: bad argument' }], isError: true });
+  assert.match(ordinary.content[0].text, /non_block_error/);
+  assert.match(ordinary.content[1].text, /bad argument/);
+
+  const policyMarker = ['Error: Command', 'not allowed: sample-command'].join(' ');
+  const blocked = classifyToolResult({ content: [{ type: 'text', text: policyMarker }], isError: true });
+  assert.match(blocked.content[0].text, /command_blocked/);
+
+  const nonzero = classifyToolResult({ content: [{ type: 'text', text: 'Process completed with exit code 1' }] });
+  assert.match(nonzero.content[0].text, /non_block_error/);
+
+  const shellFailure = classifyToolResult({ content: [{ type: 'text', text: 'FullyQualifiedErrorId : CommandNotFoundException' }] });
+  assert.match(shellFailure.content[0].text, /non_block_error/);
+
+  const quotedPolicyText = classifyToolResult({ content: [{ type: 'text', text: `const marker = '${policyMarker}'` }] });
+  assert.doesNotMatch(quotedPolicyText.content[0].text, /command_blocked/);
+
+  const success = { content: [{ type: 'text', text: 'ok' }] };
+  assert.equal(classifyToolResult(success), success);
+  assert.match(WCM_ERROR_SEMANTICS, /only the exact marker/);
+}
+
 async function main() {
   try {
+    testErrorClassification();
     await testConfigAndOAuth();
     await testWorkerHeartbeat();
     await testWorkerReconnectIsolation();
