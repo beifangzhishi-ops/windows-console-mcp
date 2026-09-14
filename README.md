@@ -56,8 +56,6 @@ See [`worker/README.md`](worker/README.md) for the dedicated Docker worker insta
 
 The router adds `list_devices` and requires `deviceId` on every Desktop Commander tool. Example targets are `local-pc` and `remote-worker`.
 
-The router also adds `attach_file` for local controller files. It returns a standard MCP `resource_link` (`wcm-file://...`) with the file name, MIME type, and byte size so MCP clients such as ChatGPT can receive and reference the file without first embedding its bytes in a tool response. `resources/read` resolves these links for files up to 8 MiB; larger files remain link-only to avoid injecting very large base64 payloads into the model context. `read_file_plain` also supports `options.asResourceLink=true` as a compatibility path for clients that cache an older tool list.
-
 ## Checks
 
 ```powershell
