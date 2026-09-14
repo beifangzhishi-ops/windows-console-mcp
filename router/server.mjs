@@ -19,6 +19,12 @@ const MAX_BODY_BYTES = 1024 * 1024;
 const ROUTER_TRACE_FILE = path.resolve(process.cwd(), 'logs', 'router-trace.log');
 const registry = loadDeviceRegistry(process.cwd());
 const serverInfo = { name: 'windows-console-mcp', version: '1.1.2' };
+const SPECIALIZED_CAPABILITIES = [
+  'Bundled specialized capabilities (discoverability only; these are helper workflows, not standalone MCP actions):',
+  '- Bilibili download: tools\\bilibili-download contains bridge.py for browser-side signed DASH metadata plus a bundled yt-dlp.exe fallback. For authenticated 1080P, prefer the documented BMG logged-in session -> playurl -> WCM/curl -> ffmpeg workflow.',
+  '- Quark transfer: tools\\quark-transfer\\cloud-transfer.ps1 provides probe/upload commands and reuses the logged-in Windows Quark client for background uploads.',
+  'When a request matches one of these capabilities, do not assume WCM lacks it. Read the README in that tool directory first, then use start_process and BMG where the documented workflow requires an authenticated browser session.',
+].join('\n');
 fs.mkdirSync(path.dirname(ROUTER_TRACE_FILE), { recursive: true });
 function appendRouterTrace(level, message) {
   try { fs.appendFileSync(ROUTER_TRACE_FILE, `[${new Date().toISOString()}] ${level} ${message}\n`, 'utf8'); }
@@ -213,9 +219,12 @@ function augmentTools(tools) {
       deviceId: toolDeviceSchema(),
     };
     inputSchema.required = Array.from(new Set([...(inputSchema.required || []), 'deviceId']));
+    const capabilityHint = baseTool.name === 'start_process'
+      ? `\n\n${SPECIALIZED_CAPABILITIES}`
+      : '';
     const description = typeof baseTool.description === 'string'
-      ? `${baseTool.description}\n\n${WCM_ERROR_SEMANTICS}`
-      : WCM_ERROR_SEMANTICS;
+      ? `${baseTool.description}${capabilityHint}\n\n${WCM_ERROR_SEMANTICS}`
+      : `${capabilityHint.trim()}\n\n${WCM_ERROR_SEMANTICS}`.trim();
     return { ...baseTool, description, inputSchema };
   });
   const plainAliases = [];
@@ -230,7 +239,7 @@ function augmentTools(tools) {
   return [
     {
       name: 'list_devices',
-      description: 'List Windows Console devices and their online status.',
+      description: `List Windows Console devices and their online status.\n\n${SPECIALIZED_CAPABILITIES}`,
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     },
     ...plainAliases,
@@ -316,7 +325,7 @@ function modernDiscovery(id) {
     result: modernResult({
       supportedVersions: [MODERN_PROTOCOL],
       capabilities: { tools: { listChanged: true }, resources: {} },
-      instructions: `Call list_devices first. Every Desktop Commander tool requires an explicit deviceId. ${WCM_ERROR_SEMANTICS}`,
+      instructions: `Call list_devices first. Every Desktop Commander tool requires an explicit deviceId.\n\n${SPECIALIZED_CAPABILITIES}\n\n${WCM_ERROR_SEMANTICS}`,
       ttlMs: 5000,
       cacheScope: 'private',
     }),
@@ -382,6 +391,7 @@ function legacyInitializeResult(payload) {
       protocolVersion: LEGACY_PROTOCOL,
       capabilities: { tools: { listChanged: true }, resources: {} },
       serverInfo,
+      instructions: `Call list_devices first. Every Desktop Commander tool requires an explicit deviceId.\n\n${SPECIALIZED_CAPABILITIES}\n\n${WCM_ERROR_SEMANTICS}`,
     },
   };
 }

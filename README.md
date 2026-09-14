@@ -56,6 +56,8 @@ See [`worker/README.md`](worker/README.md) for the dedicated Docker worker insta
 
 The router adds `list_devices` and requires `deviceId` on every Desktop Commander tool. Example targets are `local-pc` and `remote-worker`.
 
+The router also advertises bundled specialized capabilities in MCP discovery, `list_devices`, and `start_process` descriptions so an LLM can discover them without pretending that each helper is a standalone MCP action. The current catalog contains two capabilities: Bilibili download under `tools/bilibili-download` (including its bridge and bundled `yt-dlp.exe` fallback) and Quark transfer under `tools/quark-transfer`. Their READMEs remain the source of truth for invocation details and authentication requirements.
+
 ## Checks
 
 > Coding agents: read [`AGENTS.md`](AGENTS.md) before running tests on a live WCM host.
