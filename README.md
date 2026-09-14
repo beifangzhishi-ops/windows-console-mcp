@@ -58,12 +58,14 @@ The router adds `list_devices` and requires `deviceId` on every Desktop Commande
 
 ## Checks
 
+> Coding agents: read [`AGENTS.md`](AGENTS.md) before running tests on a live WCM host.
+
 ```powershell
 npm test
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\rdc-status.ps1
 ```
 
-`npm test` is self-contained: it uses temporary state and does not require or modify a live deployment. It covers OAuth state pruning/caps, worker heartbeat expiry, and reconnect isolation.
+`npm test` is self-contained with respect to test data/config, but do not launch it through the same live WCM connection that is controlling this checkout: doing so can interrupt that worker/gateway transport and cause temporary HTTP 502s. Run it from an independent local terminal instead. It covers OAuth state pruning/caps, worker heartbeat expiry, and reconnect isolation.
 
 To exercise an already configured live controller and sidecar, run:
 
