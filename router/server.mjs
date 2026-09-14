@@ -15,6 +15,8 @@ const MCP_PATH = '/mcp';
 const MODERN_PROTOCOL = '2026-07-28';
 const LEGACY_PROTOCOL = '2025-06-18';
 const MAX_BODY_BYTES = 1024 * 1024;
+const MAX_EMBEDDED_RESOURCE_BYTES = 8 * 1024 * 1024;
+const LOCAL_RESOURCE_PREFIX = 'wcm-file://';
 const ROUTER_TRACE_FILE = path.resolve(process.cwd(), 'logs', 'router-trace.log');
 const registry = loadDeviceRegistry(process.cwd());
 const serverInfo = { name: 'windows-console-mcp', version: '1.1.2' };
@@ -45,6 +47,56 @@ function enabledDevices() {
 function getDevice(deviceId) {
   return registry.get(deviceId);
 }
+
+function mimeTypeForFile(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  return ({
+    '.txt': 'text/plain', '.md': 'text/markdown', '.json': 'application/json',
+    '.csv': 'text/csv', '.html': 'text/html', '.htm': 'text/html',
+    '.pdf': 'application/pdf', '.png': 'image/png', '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp',
+    '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    '.mp4': 'video/mp4', '.mov': 'video/quicktime', '.zip': 'application/zip',
+  })[ext] || 'application/octet-stream';
+}
+
+function localResourceLink(deviceId, filePath) {
+  const device = getDevice(deviceId);
+  if (!device?.local) throw new Error('Local resource links currently require a local device.');
+  const absolutePath = path.resolve(String(filePath || ''));
+  const stat = fs.statSync(absolutePath);
+  if (!stat.isFile()) throw new Error('Resource path is not a file: ' + absolutePath);
+  const encoded = Buffer.from(absolutePath, 'utf8').toString('base64url');
+  return {
+    type: 'resource_link',
+    uri: LOCAL_RESOURCE_PREFIX + device.deviceId + '/' + encoded,
+    name: path.basename(absolutePath),
+    mimeType: mimeTypeForFile(absolutePath),
+    size: stat.size,
+  };
+}
+
+function readLocalResource(uri) {
+  const match = /^wcm-file:\/\/([^/]+)\/([A-Za-z0-9_-]+)$/u.exec(String(uri || ''));
+  if (!match) return null;
+  const device = getDevice(match[1]);
+  if (!device?.local) throw new Error('Unknown or non-local resource device: ' + match[1]);
+  const absolutePath = Buffer.from(match[2], 'base64url').toString('utf8');
+  const stat = fs.statSync(absolutePath);
+  if (!stat.isFile()) throw new Error('Resource path is not a file: ' + absolutePath);
+  if (stat.size > MAX_EMBEDDED_RESOURCE_BYTES) {
+    throw new Error('Resource is too large to embed through resources/read: ' + stat.size + ' bytes.');
+  }
+  const mimeType = mimeTypeForFile(absolutePath);
+  const data = fs.readFileSync(absolutePath);
+  const contents = { uri, mimeType };
+  if (mimeType.startsWith('text/') || mimeType === 'application/json') contents.text = data.toString('utf8');
+  else contents.blob = data.toString('base64');
+  return { contents: [contents] };
+}
+
 function sendJson(response, status, body, headers = {}) {
   const text = JSON.stringify(body);
   response.statusCode = status;
@@ -201,6 +253,7 @@ function stripToolUiMetadata(tool) {
 }
 
 function augmentTools(tools) {
+  // Router-owned tools are added alongside worker tools below.
   const routed = tools.map((tool) => {
     const baseTool = stripToolUiMetadata(tool);
     const inputSchema = baseTool?.inputSchema && typeof baseTool.inputSchema === 'object'
@@ -228,6 +281,19 @@ function augmentTools(tools) {
       name: 'list_devices',
       description: 'List Windows Console devices and their online status.',
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    },
+    {
+      name: 'attach_file',
+      description: 'Expose a local Windows file to the MCP client as a resource link.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          deviceId: toolDeviceSchema(),
+          path: { type: 'string', description: 'Absolute path to a local file.' },
+        },
+        required: ['deviceId', 'path'],
+        additionalProperties: false,
+      },
     },
     ...plainAliases,
     ...routed,
@@ -263,6 +329,10 @@ const RESOURCE_METHODS = new Set([
 async function forwardDefaultResource(payload, sourcePayload = null) {
   const method = String(payload?.method || '');
   if (!RESOURCE_METHODS.has(method)) throw new Error('Unsupported resource method: ' + method);
+  if (method === 'resources/read') {
+    const local = readLocalResource(payload?.params?.uri);
+    if (local) return { jsonrpc: '2.0', id: payload?.id ?? null, result: local };
+  }
   return callWorker(registry.defaultDeviceId, payload, sourcePayload);
 }
 
@@ -281,6 +351,20 @@ async function executeTool(payload, sourcePayload = null) {
     });
   }
   const { args, deviceId, device } = selectedToolDevice(payload);
+  if (payload?.params?.name === 'attach_file') {
+    try {
+      return { content: [localResourceLink(deviceId, args?.path)], isError: false };
+    } catch (error) {
+      return toolResult({ error: String(error?.message || error) }, true);
+    }
+  }
+  if (payload?.params?.name === 'read_file_plain' && args?.options?.asResourceLink === true) {
+    try {
+      return { content: [localResourceLink(deviceId, args?.path)], isError: false };
+    } catch (error) {
+      return toolResult({ error: String(error?.message || error) }, true);
+    }
+  }
   if (!device) {
     const detail = deviceId ? 'Unknown or disabled deviceId: ' + deviceId : 'deviceId is required.';
     return toolResult({ error: detail, devices: hub.listStatus() }, true);

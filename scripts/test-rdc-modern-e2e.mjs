@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import { loadConfig } from '../rdc-sidecar/config.mjs';
 import { createPkceChallenge } from '../rdc-sidecar/oauth.mjs';
 
@@ -159,6 +160,23 @@ async function runModern(approvalSecret) {
   });
   if (targetConfig?.isError === true || !Array.isArray(targetConfig?.content)) {
     throw new Error(`get_config(deviceId=${targetDeviceId}) failed.`);
+  }
+
+  const attachTool = tools.find((tool) => tool?.name === 'attach_file');
+  if (!attachTool) throw new Error('attach_file was not listed.');
+  const localDeviceId = deviceInfo?.devices?.find((item) => item?.local && item?.online)?.deviceId;
+  if (!localDeviceId) throw new Error('No online local device was available for attach_file testing.');
+  const attached = await mcp(accessToken, 41, 'tools/call', {
+    name: 'attach_file',
+    arguments: { deviceId: localDeviceId, path: path.resolve('README.md') },
+  });
+  const attachedLink = attached?.content?.find((item) => item?.type === 'resource_link');
+  if (attached?.isError === true || !attachedLink?.uri?.startsWith('wcm-file://')) {
+    throw new Error('attach_file did not return a WCM resource link.');
+  }
+  const attachedRead = await mcp(accessToken, 42, 'resources/read', { uri: attachedLink.uri });
+  if (!attachedRead?.contents?.[0]?.text?.includes('# Windows Console MCP')) {
+    throw new Error('resources/read did not return attached README content.');
   }
 
   const resourcesResult = await mcp(accessToken, 5, 'resources/list', {});
