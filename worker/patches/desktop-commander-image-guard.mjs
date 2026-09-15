@@ -24,7 +24,7 @@ import fs from "fs/promises";
 import sharp from "sharp";
 import { fileTypeFromFile } from "file-type";
 
-const MAX_INLINE_IMAGE_BYTES = Number.parseInt(process.env.DESKTOP_COMMANDER_MAX_INLINE_IMAGE_BYTES || '131072', 10);
+const MAX_INLINE_IMAGE_BYTES = Number.parseInt(process.env.DESKTOP_COMMANDER_MAX_INLINE_IMAGE_BYTES || '65536', 10);
 const MAX_IMAGE_PIXELS = Number.parseInt(process.env.DESKTOP_COMMANDER_MAX_IMAGE_PIXELS || '100000000', 10);
 const PREVIEW_WIDTHS = [1600, 1200, 900, 640, 480, 320];
 const PREVIEW_QUALITIES = [76, 70, 64, 58, 52, 46];

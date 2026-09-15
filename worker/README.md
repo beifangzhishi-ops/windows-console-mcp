@@ -46,7 +46,7 @@ The worker applies a compatibility patch to the pinned Desktop Commander 0.2.48 
 
 The patch treats an image filename extension only as a candidate. Local images must also pass file-signature detection and decoder validation before they can be returned as MCP image content. Invalid or damaged image-like files fall back to the binary-file path instead of being blindly base64 encoded.
 
-Large valid images are converted to a bounded WebP preview. The default raw inline-image budget is 128 KiB and can be overridden with `DESKTOP_COMMANDER_MAX_INLINE_IMAGE_BYTES` inside the worker environment.
+Large valid images are converted to a bounded WebP preview. The default raw inline-image budget is 64 KiB and can be overridden with `DESKTOP_COMMANDER_MAX_INLINE_IMAGE_BYTES` inside the worker environment. For slide/image inspection, keep `read_multiple_files` batches to at most four images so the aggregate JSON-RPC result remains comfortably below the response guard.
 
 Desktop Commander stdout is also guarded before JSON-RPC leaves the child process. Complete JSON-RPC writes larger than 512 KiB are replaced with a compact `-32099` error; the limit can be overridden with `DESKTOP_COMMANDER_MAX_STDOUT_JSON_BYTES`. The worker proxy keeps a second 512 KiB response guard as defense in depth via `WC_MAX_DC_RESPONSE_BYTES=524288`.
 

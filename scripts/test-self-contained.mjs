@@ -14,6 +14,7 @@ import {
 } from '../rdc-sidecar/oauth.mjs';
 import { WorkerHub } from '../router/worker-hub.mjs';
 import { classifyToolResult, WCM_ERROR_SEMANTICS } from '../router/error-classification.mjs';
+import { guardRouterToolResult, resolveMaxRouterToolResultBytes } from '../router/response-guard.mjs';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wcm-test-'));
@@ -271,6 +272,17 @@ lines.on('line', (line) => {
   }
   if (stderr.trim()) throw new Error('Worker test stderr: ' + stderr.trim());
 }
+function testRouterResponseGuard() {
+  const limit = resolveMaxRouterToolResultBytes('65536');
+  assert.equal(limit, 65536);
+  const small = guardRouterToolResult({ content: [{ type: 'text', text: 'ok' }] }, limit);
+  assert.equal(small.blocked, false);
+  const large = guardRouterToolResult({ content: [{ type: 'text', text: 'x'.repeat(70000) }] }, limit);
+  assert.equal(large.blocked, true);
+  assert.equal(large.result.isError, true);
+  assert.match(large.result.content[0].text, /blocked oversized tool result/);
+}
+
 function testErrorClassification() {
   const ordinary = classifyToolResult({ content: [{ type: 'text', text: 'Error: bad argument' }], isError: true });
   assert.match(ordinary.content[0].text, /non_block_error/);
@@ -297,6 +309,7 @@ function testErrorClassification() {
 async function main() {
   try {
     testErrorClassification();
+    testRouterResponseGuard();
     await testConfigAndOAuth();
     await testWorkerHeartbeat();
     await testWorkerReconnectIsolation();

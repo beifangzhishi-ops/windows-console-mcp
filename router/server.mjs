@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { loadDeviceRegistry } from './devices.mjs';
 import { WorkerHub } from './worker-hub.mjs';
 import { classifyToolResult, WCM_ERROR_SEMANTICS } from './error-classification.mjs';
+import { guardRouterToolResult, resolveMaxRouterToolResultBytes } from './response-guard.mjs';
 
 const ROUTER_HOST = process.env.WC_ROUTER_HOST || '127.0.0.1';
 const ROUTER_PORT = Number(process.env.WC_ROUTER_PORT || 18009);
@@ -16,6 +17,7 @@ const MCP_PATH = '/mcp';
 const MODERN_PROTOCOL = '2026-07-28';
 const LEGACY_PROTOCOL = '2025-06-18';
 const MAX_BODY_BYTES = 1024 * 1024;
+const MAX_TOOL_RESULT_BYTES = resolveMaxRouterToolResultBytes(process.env.WC_MAX_TOOL_RESULT_BYTES);
 const ROUTER_TRACE_FILE = path.resolve(process.cwd(), 'logs', 'router-trace.log');
 const registry = loadDeviceRegistry(process.cwd());
 const serverInfo = { name: 'windows-console-mcp', version: '1.1.2' };
@@ -222,9 +224,12 @@ function augmentTools(tools) {
     const capabilityHint = baseTool.name === 'start_process'
       ? `\n\n${SPECIALIZED_CAPABILITIES}`
       : '';
+    const stabilityHint = baseTool.name === 'read_multiple_files'
+      ? '\n\nMEDIA STABILITY: When reading images, use at most four image paths per call. For larger slide/image sets, inspect in batches or create a contact sheet with start_process.'
+      : '';
     const description = typeof baseTool.description === 'string'
-      ? `${baseTool.description}${capabilityHint}\n\n${WCM_ERROR_SEMANTICS}`
-      : `${capabilityHint.trim()}\n\n${WCM_ERROR_SEMANTICS}`.trim();
+      ? `${baseTool.description}${capabilityHint}${stabilityHint}\n\n${WCM_ERROR_SEMANTICS}`
+      : `${capabilityHint}${stabilityHint}\n\n${WCM_ERROR_SEMANTICS}`.trim();
     return { ...baseTool, description, inputSchema };
   });
   const plainAliases = [];
@@ -252,6 +257,16 @@ function toolResult(data, isError = false) {
     content: [{ type: 'text', text: typeof data === 'string' ? data : JSON.stringify(data) }],
     isError,
   });
+}
+
+function enforceToolResultSize(result, payload) {
+  const guarded = guardRouterToolResult(result, MAX_TOOL_RESULT_BYTES);
+  if (guarded.blocked) {
+    const deviceId = payload?.params?.arguments?.deviceId || '-';
+    const toolName = payload?.params?.name || '-';
+    appendRouterTrace('WARN', `TOOL RESULT BLOCKED tool=${toolName} device=${deviceId} bytes=${guarded.responseBytes} limit=${MAX_TOOL_RESULT_BYTES}`);
+  }
+  return classifyToolResult(guarded.result);
 }
 
 async function listTools(sourcePayload = null) {
@@ -356,7 +371,7 @@ async function handleModern(payload, response) {
     return;
   }
   if (payload?.method === 'tools/call') {
-    const result = await executeTool(payload, payload);
+    const result = enforceToolResultSize(await executeTool(payload, payload), payload);
     sendJson(response, 200, {
       jsonrpc: '2.0',
       id,
@@ -434,7 +449,7 @@ async function handleLegacy(payload, request, response) {
     return;
   }
   if (payload?.method === 'tools/call') {
-    const result = await executeTool(payload, session.initializePayload);
+    const result = enforceToolResultSize(await executeTool(payload, session.initializePayload), payload);
     sendSse(response, 200, {
       jsonrpc: '2.0', id: payload.id, result,
     }, sessionId);

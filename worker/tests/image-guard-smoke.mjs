@@ -48,7 +48,7 @@ try {
   assert.equal(largeHandler.constructor.name, 'ImageFileHandler');
   const largeResult = await largeHandler.read(largeJpeg);
   if (largeResult.metadata?.preview) {
-    assert.ok(largeResult.metadata.previewSize <= 131072);
+    assert.ok(largeResult.metadata.previewSize <= 65536);
     assert.equal(largeResult.mimeType, 'image/webp');
   } else {
     assert.equal(largeResult.metadata?.imageTooLarge, true);
