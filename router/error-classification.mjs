@@ -4,7 +4,9 @@ const SHELL_FAILURE_PATTERN = /(?:CommandNotFoundException|FullyQualifiedErrorId
 
 export const WCM_ERROR_SEMANTICS =
   'WCM error semantics: only the exact marker "Error: Command not allowed" means a WCM command-blocklist refusal. ' +
-  'Other errors, including schema, argument, path, command-not-found, process, and non-zero-exit failures, are not command-blocklist refusals.';
+  'Other errors, including schema, argument, path, command-not-found, process, non-zero-exit, timeout, disconnect, HTTP 502, or missing-result failures, are not command-blocklist refusals and are not evidence of a GPT safety review. ' +
+  'Only classify a GPT/OpenAI safety-review or refusal event when an explicit, observable safety-policy refusal or other verifiable safety-review signal is present; when feasible, verify the target-side state with a harmless read-only check before concluding. ' +
+  'When such a GPT safety-review/refusal is verified and WCM file writing remains available, append a concise entry to the Git-ignored local file logs/gpt-safety-review.log with timestamp, deviceId, tool/action, intended operation, the brief observable refusal signal, relevant WCM classification, and any target-state verification; never log credentials, cookies, tokens, or unrelated sensitive data, and never claim the entry was written if the write could not be performed.';
 
 export function classifyToolResult(result) {
   if (!result || typeof result !== 'object' || !Array.isArray(result.content)) return result;
