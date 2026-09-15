@@ -138,7 +138,10 @@ export class WorkerHub {
     }
 
     const existing = this.connections.get(device.deviceId);
-    if (existing && existing.socket !== state.socket) safeDestroy(existing.socket);
+    if (existing && existing.socket !== state.socket) {
+      this.#rejectPendingForDevice(device.deviceId, 'Worker connection replaced: ' + device.deviceId);
+      safeDestroy(existing.socket);
+    }
     state.authenticated = true;
     state.deviceId = device.deviceId;
     state.name = String(frame.name || device.name);
@@ -168,16 +171,20 @@ export class WorkerHub {
     else pending.resolve(frame.message);
   }
 
+  #rejectPendingForDevice(deviceId, message) {
+    for (const [requestId, pending] of this.pending) {
+      if (pending.deviceId !== deviceId) continue;
+      clearTimeout(pending.timer);
+      this.pending.delete(requestId);
+      pending.reject(new Error(message));
+    }
+  }
+
   #onClose(state) {
     if (state.authenticated && this.connections.get(state.deviceId) === state) {
       this.connections.delete(state.deviceId);
       this.logger.log('Worker disconnected: ' + state.deviceId);
-      for (const [requestId, pending] of this.pending) {
-        if (pending.deviceId !== state.deviceId) continue;
-        clearTimeout(pending.timer);
-        this.pending.delete(requestId);
-        pending.reject(new Error('Worker disconnected: ' + state.deviceId));
-      }
+      this.#rejectPendingForDevice(state.deviceId, 'Worker disconnected: ' + state.deviceId);
     }
   }
 
