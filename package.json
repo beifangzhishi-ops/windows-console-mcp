@@ -9,6 +9,7 @@
     "node": ">=20"
   },
   "scripts": {
+    "postinstall": "node scripts/apply-desktop-commander-image-guard.mjs",
     "test": "node scripts/test-self-contained.mjs",
     "test:live": "node scripts/test-rdc-e2e.mjs && node scripts/test-rdc-modern-e2e.mjs && node scripts/test-rpc-concurrency.mjs",
     "test:all": "npm test && npm run test:live",

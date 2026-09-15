@@ -14,15 +14,20 @@ if(-not $DeviceName){ $DeviceName=$env:COMPUTERNAME; if(-not $DeviceName){$Devic
 if(-not $WorkspaceRoot){ $WorkspaceRoot=Split-Path -Parent $workerDir }
 $docker=(Get-Command docker.exe -CommandType Application -ErrorAction Stop).Source
 $agent=Join-Path $workerDir 'agent.mjs'
+$guard=Join-Path $workerDir 'response-guard.mjs'
 $lock=Join-Path $workerDir 'package-lock.json'
 $dc=Join-Path $workerDir 'node_modules\@wonderwhy-er\desktop-commander\dist\index.js'
-foreach($file in @($agent,$lock)){ if(-not (Test-Path $file)){ throw "Missing worker file: $file" } }
+$patch=Join-Path $workerDir 'patches\desktop-commander-image-guard.mjs'
+foreach($file in @($agent,$guard,$lock,$patch)){ if(-not (Test-Path $file)){ throw "Missing worker file: $file" } }
 
 if(-not (Test-Path $dc)){
     Write-Output 'Installing pinned worker dependencies...'
     & $docker run --rm --mount "type=bind,source=$workerDir,target=/app" -w /app $Image npm ci --omit=dev
     if($LASTEXITCODE -ne 0){ throw 'Worker dependency install failed.' }
 }
+Write-Output 'Applying Desktop Commander stability patch...'
+& $docker run --rm --mount "type=bind,source=$workerDir,target=/app" -w /app $Image node /app/patches/desktop-commander-image-guard.mjs
+if($LASTEXITCODE -ne 0){ throw 'Desktop Commander stability patch failed.' }
 $envFile=Join-Path $workerDir 'worker.env'
 $envText=@(
     "WC_DEVICE_ID=$DeviceId"
@@ -32,6 +37,7 @@ $envText=@(
     'WC_DC_NODE=/usr/local/bin/node'
     'WC_DC_SCRIPT=/app/node_modules/@wonderwhy-er/desktop-commander/dist/index.js'
     'WC_RECONNECT_MS=3000'
+    'WC_MAX_DC_RESPONSE_BYTES=524288'
 ) -join "`n"
 [IO.File]::WriteAllText($envFile,$envText+"`n",(New-Object Text.UTF8Encoding($false)))
 

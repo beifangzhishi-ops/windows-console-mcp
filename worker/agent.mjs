@@ -3,6 +3,7 @@ import net from 'node:net';
 import path from 'node:path';
 import readline from 'node:readline';
 import { spawn } from 'node:child_process';
+import { guardDesktopCommanderMessage, resolveMaxDcResponseBytes } from './response-guard.mjs';
 
 function parseEnv(content) {
   const out = {};
@@ -31,6 +32,7 @@ const workerToken = String(env.WC_WORKER_TOKEN || '');
 const dcNode = String(env.WC_DC_NODE || process.execPath);
 const dcScript = path.resolve(String(env.WC_DC_SCRIPT || ''));
 const reconnectMs = Number(env.WC_RECONNECT_MS || 3000);
+const maxDcResponseBytes = resolveMaxDcResponseBytes(env.WC_MAX_DC_RESPONSE_BYTES);
 
 if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(deviceId)) throw new Error('Invalid WC_DEVICE_ID.');
 if (!controllerHost) throw new Error('WC_CONTROLLER_HOST is required.');
@@ -72,6 +74,7 @@ function startDesktopCommander() {
     let message;
     try { message = JSON.parse(text); }
     catch { return; }
+    message = guardDesktopCommanderMessage(message, Buffer.byteLength(text, 'utf8'), maxDcResponseBytes);
     if (message?.id === undefined || message?.id === null) return;
     const key = rpcKey(message.id);
     const pending = pendingByRpcId.get(key);
