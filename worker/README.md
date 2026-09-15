@@ -48,7 +48,7 @@ The patch treats an image filename extension only as a candidate. Local images m
 
 Large valid images are converted to a bounded WebP preview. The default raw inline-image budget is 128 KiB and can be overridden with `DESKTOP_COMMANDER_MAX_INLINE_IMAGE_BYTES` inside the worker environment.
 
-The worker proxy also rejects oversized Desktop Commander JSON-RPC responses before forwarding them to the controller. The installer sets `WC_MAX_DC_RESPONSE_BYTES=524288` (512 KiB) by default.
+Desktop Commander stdout is also guarded before JSON-RPC leaves the child process. Complete JSON-RPC writes larger than 512 KiB are replaced with a compact `-32099` error; the limit can be overridden with `DESKTOP_COMMANDER_MAX_STDOUT_JSON_BYTES`. The worker proxy keeps a second 512 KiB response guard as defense in depth via `WC_MAX_DC_RESPONSE_BYTES=524288`.
 
 Run the focused regression checks without starting or stopping the live gateway:
 

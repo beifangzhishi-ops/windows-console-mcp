@@ -17,6 +17,7 @@ if (pkg.version !== '0.2.48') {
 
 const imageFile = path.join(dcRoot, 'dist', 'utils', 'files', 'image.js');
 const factoryFile = path.join(dcRoot, 'dist', 'utils', 'files', 'factory.js');
+const stdioFile = path.join(dcRoot, 'dist', 'custom-stdio.js');
 
 const imageSource = `/** WCM_IMAGE_GUARD_V1 */
 import fs from "fs/promises";
@@ -149,4 +150,41 @@ if (!factory.includes('WCM_IMAGE_GUARD_V1')) {
   fs.writeFileSync(factoryFile, factory, 'utf8');
 }
 
-console.log('Desktop Commander image guard applied to version ' + pkg.version + '.');
+let stdio = fs.readFileSync(stdioFile, 'utf8');
+const oldStdioAllowBlock = `                    // This looks like a valid JSON-RPC message, allow it
+                    return this.originalStdoutWrite.call(process.stdout, buffer, encoding, callback);`;
+const newStdioAllowBlock = `                    // WCM_STDOUT_RESPONSE_GUARD_V1: bound complete JSON-RPC lines before forwarding.
+                    const configuredLimit = Number.parseInt(process.env.DESKTOP_COMMANDER_MAX_STDOUT_JSON_BYTES || '524288', 10);
+                    const maxBytes = Number.isFinite(configuredLimit) && configuredLimit >= 65536 ? configuredLimit : 524288;
+                    const responseBytes = Buffer.byteLength(buffer, 'utf8');
+                    if (responseBytes > maxBytes) {
+                        try {
+                            const message = JSON.parse(trimmed);
+                            if (message && message.id !== undefined && message.id !== null) {
+                                const guarded = JSON.stringify({
+                                    jsonrpc: message.jsonrpc || '2.0',
+                                    id: message.id,
+                                    error: {
+                                        code: -32099,
+                                        message: 'Desktop Commander response blocked by safety limit (' + responseBytes + ' > ' + maxBytes + ' bytes). Use pagination or reduce output.'
+                                    }
+                                }) + '\\n';
+                                return this.originalStdoutWrite.call(process.stdout, guarded, encoding, callback);
+                            }
+                        } catch {}
+                        const suppressed = JSON.stringify({
+                            jsonrpc: '2.0',
+                            method: 'notifications/message',
+                            params: { level: 'warning', logger: 'desktop-commander', data: 'Oversized JSON-RPC stdout suppressed (' + responseBytes + ' bytes).' }
+                        }) + '\\n';
+                        return this.originalStdoutWrite.call(process.stdout, suppressed, encoding, callback);
+                    }
+                    return this.originalStdoutWrite.call(process.stdout, buffer, encoding, callback);`;
+
+if (!stdio.includes('WCM_STDOUT_RESPONSE_GUARD_V1')) {
+  if (!stdio.includes(oldStdioAllowBlock)) throw new Error('custom-stdio.js layout changed; refusing unsafe patch.');
+  stdio = stdio.replace(oldStdioAllowBlock, newStdioAllowBlock);
+  fs.writeFileSync(stdioFile, stdio, 'utf8');
+}
+
+console.log('Desktop Commander image and stdout guards applied to version ' + pkg.version + '.');
