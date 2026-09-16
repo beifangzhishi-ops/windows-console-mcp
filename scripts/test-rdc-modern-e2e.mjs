@@ -125,12 +125,18 @@ async function runModern(approvalSecret) {
     throw new Error('server/discover did not advertise tools.listChanged=true.');
   }
   if (!discover?.capabilities?.resources) throw new Error('server/discover did not advertise resources.');
+  if (!discover?.instructions?.includes('network connectivity can be transiently unstable')) {
+    throw new Error('server/discover did not advertise transient network error semantics.');
+  }
   const toolsResult = await mcp(accessToken, 2, 'tools/list', {});
   const tools = toolsResult?.tools;
   if (!Array.isArray(tools) || tools.length < 20) throw new Error('tools/list returned too few tools.');
   const listDevicesTool = tools.find((tool) => tool?.name === 'list_devices');
   const getConfigTool = tools.find((tool) => tool?.name === 'get_config');
   if (!listDevicesTool || !getConfigTool) throw new Error('required routed tools were not listed.');
+  if (!listDevicesTool.description?.includes('network connectivity can be transiently unstable')) {
+    throw new Error('list_devices did not advertise transient network error semantics.');
+  }
   if (!getConfigTool.inputSchema?.required?.includes('deviceId')) {
     throw new Error('get_config does not require deviceId.');
   }

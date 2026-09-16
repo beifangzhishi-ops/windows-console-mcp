@@ -244,7 +244,7 @@ function augmentTools(tools) {
   return [
     {
       name: 'list_devices',
-      description: `List Windows Console devices and their online status.\n\n${SPECIALIZED_CAPABILITIES}`,
+      description: `List Windows Console devices and their online status.\n\n${SPECIALIZED_CAPABILITIES}\n\n${WCM_ERROR_SEMANTICS}`,
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     },
     ...plainAliases,
