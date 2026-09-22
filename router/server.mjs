@@ -10,6 +10,7 @@ import {
   WCM_TOOL_FAILURE_RULE,
 } from './error-classification.mjs';
 import { guardRouterToolResult, resolveMaxRouterToolResultBytes } from './response-guard.mjs';
+import { ConnectionScopedToolListCache } from './tool-list-cache.mjs';
 
 const ROUTER_HOST = process.env.WC_ROUTER_HOST || '127.0.0.1';
 const ROUTER_PORT = Number(process.env.WC_ROUTER_PORT || 18009);
@@ -50,6 +51,7 @@ const hub = new WorkerHub({
 });
 const legacySessions = new Map();
 const workerInitialization = new Map();
+const toolListCache = new ConnectionScopedToolListCache();
 
 function enabledDevices() {
   return registry.devices.filter((device) => device.enabled);
@@ -275,6 +277,10 @@ function enforceToolResultSize(result, payload) {
 
 async function listTools(sourcePayload = null) {
   const deviceId = registry.defaultDeviceId;
+  const connection = hub.connectionInfo(deviceId);
+  if (!connection) throw new Error('Worker is offline: ' + deviceId);
+  const cached = toolListCache.get(connection.connectionId);
+  if (cached) return cached;
   const payload = {
     jsonrpc: '2.0',
     id: 'worker-tools-' + randomUUID(),
@@ -285,7 +291,10 @@ async function listTools(sourcePayload = null) {
   if (!Array.isArray(message?.result?.tools)) {
     throw new Error('Default worker tools/list failed: ' + deviceId);
   }
-  return augmentTools(message.result.tools);
+  const tools = augmentTools(message.result.tools);
+  const current = hub.connectionInfo(deviceId);
+  if (!current) throw new Error('Worker disconnected during tools/list: ' + deviceId);
+  return toolListCache.set(current.connectionId, tools);
 }
 
 const RESOURCE_METHODS = new Set([

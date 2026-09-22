@@ -19,6 +19,7 @@ import {
   WCM_TOOL_FAILURE_RULE,
 } from '../router/error-classification.mjs';
 import { guardRouterToolResult, resolveMaxRouterToolResultBytes } from '../router/response-guard.mjs';
+import { ConnectionScopedToolListCache } from '../router/tool-list-cache.mjs';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wcm-test-'));
@@ -287,6 +288,17 @@ function testRouterResponseGuard() {
   assert.match(large.result.content[0].text, /blocked oversized tool result/);
 }
 
+function testToolListCache() {
+  const cache = new ConnectionScopedToolListCache();
+  const tools = [{ name: 'example' }];
+  assert.equal(cache.get('connection-a'), null);
+  assert.equal(cache.set('connection-a', tools), tools);
+  assert.equal(cache.get('connection-a'), tools);
+  assert.equal(cache.get('connection-b'), null);
+  assert.throws(() => cache.set('', tools), /connection id/);
+  assert.throws(() => cache.set('connection-a', {}), /tools array/);
+}
+
 function testErrorClassification() {
   const ordinary = classifyToolResult({ content: [{ type: 'text', text: 'Error: bad argument' }], isError: true });
   assert.match(ordinary.content[0].text, /WCM_CLASSIFICATION=runtime_error/);
@@ -330,6 +342,7 @@ async function main() {
   try {
     testErrorClassification();
     testRouterResponseGuard();
+    testToolListCache();
     await testConfigAndOAuth();
     await testWorkerHeartbeat();
     await testWorkerReconnectIsolation();
