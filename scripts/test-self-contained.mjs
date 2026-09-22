@@ -20,6 +20,7 @@ import {
 } from '../router/error-classification.mjs';
 import { guardRouterToolResult, resolveMaxRouterToolResultBytes } from '../router/response-guard.mjs';
 import { ConnectionScopedToolListCache } from '../router/tool-list-cache.mjs';
+import { routerClientInfo, serverInfo } from '../router/server-info.mjs';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wcm-test-'));
@@ -299,6 +300,16 @@ function testToolListCache() {
   assert.throws(() => cache.set('connection-a', {}), /tools array/);
 }
 
+function testServerInfo() {
+  const packageInfo = JSON.parse(
+    fs.readFileSync(path.join(rootDir, 'package.json'), 'utf8'),
+  );
+  assert.equal(serverInfo.name, packageInfo.name);
+  assert.equal(serverInfo.version, packageInfo.version);
+  assert.equal(routerClientInfo.name, 'windows-console-router');
+  assert.equal(routerClientInfo.version, packageInfo.version);
+}
+
 function testErrorClassification() {
   const ordinary = classifyToolResult({ content: [{ type: 'text', text: 'Error: bad argument' }], isError: true });
   assert.match(ordinary.content[0].text, /WCM_CLASSIFICATION=runtime_error/);
@@ -343,6 +354,7 @@ async function main() {
     testErrorClassification();
     testRouterResponseGuard();
     testToolListCache();
+    testServerInfo();
     await testConfigAndOAuth();
     await testWorkerHeartbeat();
     await testWorkerReconnectIsolation();

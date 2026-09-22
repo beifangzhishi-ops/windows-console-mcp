@@ -11,6 +11,7 @@ import {
 } from './error-classification.mjs';
 import { guardRouterToolResult, resolveMaxRouterToolResultBytes } from './response-guard.mjs';
 import { ConnectionScopedToolListCache } from './tool-list-cache.mjs';
+import { routerClientInfo, serverInfo } from './server-info.mjs';
 
 const ROUTER_HOST = process.env.WC_ROUTER_HOST || '127.0.0.1';
 const ROUTER_PORT = Number(process.env.WC_ROUTER_PORT || 18009);
@@ -25,7 +26,6 @@ const MAX_BODY_BYTES = 1024 * 1024;
 const MAX_TOOL_RESULT_BYTES = resolveMaxRouterToolResultBytes(process.env.WC_MAX_TOOL_RESULT_BYTES);
 const ROUTER_TRACE_FILE = path.resolve(process.cwd(), 'logs', 'router-trace.log');
 const registry = loadDeviceRegistry(process.cwd());
-const serverInfo = { name: 'windows-console-mcp', version: '1.1.2' };
 const SPECIALIZED_CAPABILITIES = [
   'Bundled specialized capabilities (discoverability only; these are helper workflows, not standalone MCP actions):',
   '- Bilibili download: tools\\bilibili-download contains bridge.py for browser-side signed DASH metadata plus a bundled yt-dlp.exe fallback. For authenticated 1080P, prefer the documented BMG logged-in session -> playurl -> WCM/curl -> ffmpeg workflow.',
@@ -117,7 +117,7 @@ function stripModernMeta(payload) {
 function legacyInitializePayload(sourcePayload = null) {
   const clientInfo = sourcePayload?.params?.clientInfo ||
     sourcePayload?.params?._meta?.['io.modelcontextprotocol/clientInfo'] ||
-    { name: 'windows-console-router', version: '1.1.2' };
+    routerClientInfo;
   return {
     jsonrpc: '2.0',
     id: 'worker-init-' + randomUUID(),
