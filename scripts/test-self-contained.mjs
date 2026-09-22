@@ -13,7 +13,11 @@ import {
   createPkceChallenge,
 } from '../rdc-sidecar/oauth.mjs';
 import { WorkerHub } from '../router/worker-hub.mjs';
-import { classifyToolResult, WCM_ERROR_SEMANTICS } from '../router/error-classification.mjs';
+import {
+  classifyToolResult,
+  WCM_ERROR_SEMANTICS,
+  WCM_TOOL_FAILURE_RULE,
+} from '../router/error-classification.mjs';
 import { guardRouterToolResult, resolveMaxRouterToolResultBytes } from '../router/response-guard.mjs';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -285,18 +289,32 @@ function testRouterResponseGuard() {
 
 function testErrorClassification() {
   const ordinary = classifyToolResult({ content: [{ type: 'text', text: 'Error: bad argument' }], isError: true });
-  assert.match(ordinary.content[0].text, /non_block_error/);
+  assert.match(ordinary.content[0].text, /WCM_CLASSIFICATION=runtime_error/);
+  assert.equal(ordinary.structuredContent.wcm_classification, 'runtime_error');
+  assert.equal(ordinary.structuredContent.gpt_safety_review_indicated, false);
   assert.match(ordinary.content[1].text, /bad argument/);
 
   const policyMarker = ['Error: Command', 'not allowed: sample-command'].join(' ');
   const blocked = classifyToolResult({ content: [{ type: 'text', text: policyMarker }], isError: true });
-  assert.match(blocked.content[0].text, /command_blocked/);
+  assert.match(blocked.content[0].text, /WCM_CLASSIFICATION=command_blocked/);
+  assert.equal(blocked.structuredContent.wcm_classification, 'command_blocked');
+
+  const transient = classifyToolResult(
+    { content: [{ type: 'text', text: 'Worker request timed out: noha' }], isError: true },
+    { deviceOnline: false },
+  );
+  assert.match(transient.content[0].text, /WCM_CLASSIFICATION=transient_transport_error/);
+  assert.match(transient.content[0].text, /DEVICE_ONLINE=false/);
+  assert.equal(transient.structuredContent.wcm_classification, 'transient_transport_error');
+  assert.equal(transient.structuredContent.device_online, false);
+  assert.equal(transient.structuredContent.retry_recommended, true);
+  assert.equal(transient.structuredContent.gpt_safety_review_indicated, false);
 
   const nonzero = classifyToolResult({ content: [{ type: 'text', text: 'Process completed with exit code 1' }] });
-  assert.match(nonzero.content[0].text, /non_block_error/);
+  assert.match(nonzero.content[0].text, /WCM_CLASSIFICATION=runtime_error/);
 
   const shellFailure = classifyToolResult({ content: [{ type: 'text', text: 'FullyQualifiedErrorId : CommandNotFoundException' }] });
-  assert.match(shellFailure.content[0].text, /non_block_error/);
+  assert.match(shellFailure.content[0].text, /WCM_CLASSIFICATION=runtime_error/);
 
   const quotedPolicyText = classifyToolResult({ content: [{ type: 'text', text: `const marker = '${policyMarker}'` }] });
   assert.doesNotMatch(quotedPolicyText.content[0].text, /command_blocked/);
@@ -304,6 +322,8 @@ function testErrorClassification() {
   const success = { content: [{ type: 'text', text: 'ok' }] };
   assert.equal(classifyToolResult(success), success);
   assert.match(WCM_ERROR_SEMANTICS, /only the exact marker/);
+  assert.match(WCM_TOOL_FAILURE_RULE, /Network\/timeout\/disconnect/);
+  assert.ok(WCM_TOOL_FAILURE_RULE.length < WCM_ERROR_SEMANTICS.length);
 }
 
 async function main() {

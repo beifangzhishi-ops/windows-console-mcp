@@ -4,7 +4,11 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { loadDeviceRegistry } from './devices.mjs';
 import { WorkerHub } from './worker-hub.mjs';
-import { classifyToolResult, WCM_ERROR_SEMANTICS } from './error-classification.mjs';
+import {
+  classifyToolResult,
+  WCM_ERROR_SEMANTICS,
+  WCM_TOOL_FAILURE_RULE,
+} from './error-classification.mjs';
 import { guardRouterToolResult, resolveMaxRouterToolResultBytes } from './response-guard.mjs';
 
 const ROUTER_HOST = process.env.WC_ROUTER_HOST || '127.0.0.1';
@@ -228,8 +232,8 @@ function augmentTools(tools) {
       ? '\n\nMEDIA STABILITY: When reading images, use at most four image paths per call. For larger slide/image sets, inspect in batches or create a contact sheet with start_process.'
       : '';
     const description = typeof baseTool.description === 'string'
-      ? `${baseTool.description}${capabilityHint}${stabilityHint}\n\n${WCM_ERROR_SEMANTICS}`
-      : `${capabilityHint}${stabilityHint}\n\n${WCM_ERROR_SEMANTICS}`.trim();
+      ? `${baseTool.description}${capabilityHint}${stabilityHint}\n\n${WCM_TOOL_FAILURE_RULE}`
+      : `${capabilityHint}${stabilityHint}\n\n${WCM_TOOL_FAILURE_RULE}`.trim();
     return { ...baseTool, description, inputSchema };
   });
   const plainAliases = [];
@@ -237,14 +241,14 @@ function augmentTools(tools) {
   if (readFileTool) {
     const alias = structuredClone(readFileTool);
     alias.name = 'read_file_plain';
-    alias.description = `Read file contents without any embedded UI template metadata.\n\n${WCM_ERROR_SEMANTICS}`;
+    alias.description = `Read file contents without any embedded UI template metadata.\n\n${WCM_TOOL_FAILURE_RULE}`;
     delete alias._meta;
     plainAliases.push(alias);
   }
   return [
     {
       name: 'list_devices',
-      description: `List Windows Console devices and their online status.\n\n${SPECIALIZED_CAPABILITIES}\n\n${WCM_ERROR_SEMANTICS}`,
+      description: `List Windows Console devices and their online status.\n\n${SPECIALIZED_CAPABILITIES}\n\n${WCM_TOOL_FAILURE_RULE}`,
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     },
     ...plainAliases,
@@ -252,11 +256,11 @@ function augmentTools(tools) {
   ];
 }
 
-function toolResult(data, isError = false) {
+function toolResult(data, isError = false, context = {}) {
   return classifyToolResult({
     content: [{ type: 'text', text: typeof data === 'string' ? data : JSON.stringify(data) }],
     isError,
-  });
+  }, context);
 }
 
 function enforceToolResultSize(result, payload) {
@@ -322,14 +326,21 @@ async function executeTool(payload, sourcePayload = null) {
   try {
     const message = await callWorker(device.deviceId, forwarded, sourcePayload);
     if (message.error) {
-      return toolResult({ deviceId: device.deviceId, upstreamError: message.error }, true);
+      return toolResult(
+        { deviceId: device.deviceId, upstreamError: message.error },
+        true,
+        { deviceOnline: Boolean(hub.connectionInfo(device.deviceId)) },
+      );
     }
-    return classifyToolResult(message.result || toolResult({ error: 'Worker returned no tool result.' }, true));
+    return classifyToolResult(
+      message.result || toolResult({ error: 'Worker returned no tool result.' }, true),
+      { deviceOnline: Boolean(hub.connectionInfo(device.deviceId)) },
+    );
   } catch (error) {
     return toolResult({
       deviceId: device.deviceId,
       error: String(error?.message || error),
-    }, true);
+    }, true, { deviceOnline: Boolean(hub.connectionInfo(device.deviceId)) });
   }
 }
 
@@ -340,7 +351,7 @@ function modernDiscovery(id) {
     result: modernResult({
       supportedVersions: [MODERN_PROTOCOL],
       capabilities: { tools: { listChanged: true }, resources: {} },
-      instructions: `Call list_devices first. Every Desktop Commander tool requires an explicit deviceId.\n\n${SPECIALIZED_CAPABILITIES}\n\n${WCM_ERROR_SEMANTICS}`,
+      instructions: `Every Desktop Commander tool requires an explicit deviceId. Default device: ${registry.defaultDeviceId}. Use list_devices when the target device is unknown, when current online status matters, or when diagnosing a connection failure.\n\n${SPECIALIZED_CAPABILITIES}\n\n${WCM_ERROR_SEMANTICS}`,
       ttlMs: 5000,
       cacheScope: 'private',
     }),
@@ -406,7 +417,7 @@ function legacyInitializeResult(payload) {
       protocolVersion: LEGACY_PROTOCOL,
       capabilities: { tools: { listChanged: true }, resources: {} },
       serverInfo,
-      instructions: `Call list_devices first. Every Desktop Commander tool requires an explicit deviceId.\n\n${SPECIALIZED_CAPABILITIES}\n\n${WCM_ERROR_SEMANTICS}`,
+      instructions: `Every Desktop Commander tool requires an explicit deviceId. Default device: ${registry.defaultDeviceId}. Use list_devices when the target device is unknown, when current online status matters, or when diagnosing a connection failure.\n\n${SPECIALIZED_CAPABILITIES}\n\n${WCM_ERROR_SEMANTICS}`,
     },
   };
 }
