@@ -7,6 +7,10 @@ export function resolveMaxDcResponseBytes(value) {
     : DEFAULT_MAX_DC_RESPONSE_BYTES;
 }
 
+export function shouldGuardDesktopCommanderResponse(method) {
+  return String(method || '') !== 'resources/read';
+}
+
 export function guardDesktopCommanderMessage(message, responseBytes, maxBytes) {
   if (!message || message.id === undefined || message.id === null) return message;
   if (!Number.isFinite(responseBytes) || responseBytes <= maxBytes) return message;

@@ -12,6 +12,17 @@ import {
 import { guardRouterToolResult, resolveMaxRouterToolResultBytes } from './response-guard.mjs';
 import { ConnectionScopedToolListCache } from './tool-list-cache.mjs';
 import { routerClientInfo, serverInfo } from './server-info.mjs';
+import {
+  TemporaryPermissionManager,
+  TEMP_PERMISSION_DEFAULT_SECONDS,
+} from './temporary-permissions.mjs';
+import {
+  localTemporaryPermissionResource,
+  mergeTemporaryPermissionResourceList,
+  stripTemporaryPermissionRoutingArguments,
+  temporaryPermissionRouterTools,
+  withTemporaryPermissionRoutingSchema,
+} from './temporary-permission-routing.mjs';
 
 const ROUTER_HOST = process.env.WC_ROUTER_HOST || '127.0.0.1';
 const ROUTER_PORT = Number(process.env.WC_ROUTER_PORT || 18009);
@@ -25,6 +36,11 @@ const LEGACY_PROTOCOL = '2025-06-18';
 const MAX_BODY_BYTES = 1024 * 1024;
 const MAX_TOOL_RESULT_BYTES = resolveMaxRouterToolResultBytes(process.env.WC_MAX_TOOL_RESULT_BYTES);
 const ROUTER_TRACE_FILE = path.resolve(process.cwd(), 'logs', 'router-trace.log');
+const TEMP_PERMISSION_STATE_FILE = path.resolve(
+  process.cwd(),
+  '.state',
+  'wcm-temporary-permissions.json',
+);
 const registry = loadDeviceRegistry(process.cwd());
 const SPECIALIZED_CAPABILITIES = [
   'Bundled specialized capabilities (discoverability only; these are helper workflows, not standalone MCP actions):',
@@ -41,6 +57,25 @@ const routerLogger = {
   log: (...values) => appendRouterTrace('INFO', values.map(String).join(' ')),
   error: (...values) => appendRouterTrace('ERROR', values.map(String).join(' ')),
 };
+function boundedSeconds(value, fallback, maximum) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.min(parsed, maximum);
+}
+const permissionManager = new TemporaryPermissionManager({
+  stateFile: TEMP_PERMISSION_STATE_FILE,
+  grantTtlMs: boundedSeconds(
+    process.env.WC_TEMP_PERMISSION_TTL_SECONDS,
+    TEMP_PERMISSION_DEFAULT_SECONDS,
+    TEMP_PERMISSION_DEFAULT_SECONDS,
+  ) * 1000,
+  approvalTtlMs: boundedSeconds(
+    process.env.WC_PERMISSION_APPROVAL_TTL_SECONDS,
+    15 * 60,
+    60 * 60,
+  ) * 1000,
+  audit: (event) => appendRouterTrace('AUDIT', JSON.stringify(event)),
+});
 const hub = new WorkerHub({
   registry,
   host: WORKER_HOST,
@@ -218,15 +253,10 @@ function stripToolUiMetadata(tool) {
 function augmentTools(tools) {
   const routed = tools.map((tool) => {
     const baseTool = stripToolUiMetadata(tool);
-    const inputSchema = baseTool?.inputSchema && typeof baseTool.inputSchema === 'object'
-      ? structuredClone(baseTool.inputSchema)
-      : { type: 'object', properties: {} };
-    inputSchema.type = 'object';
-    inputSchema.properties = {
-      ...(inputSchema.properties || {}),
-      deviceId: toolDeviceSchema(),
-    };
-    inputSchema.required = Array.from(new Set([...(inputSchema.required || []), 'deviceId']));
+    const inputSchema = withTemporaryPermissionRoutingSchema(
+      baseTool?.inputSchema,
+      toolDeviceSchema(),
+    );
     const capabilityHint = baseTool.name === 'start_process'
       ? `\n\n${SPECIALIZED_CAPABILITIES}`
       : '';
@@ -250,9 +280,10 @@ function augmentTools(tools) {
   return [
     {
       name: 'list_devices',
-      description: `List Windows Console devices and their online status.\n\n${SPECIALIZED_CAPABILITIES}\n\n${WCM_TOOL_FAILURE_RULE}`,
+      description: `List Windows Console devices and their online status.\n\n${SPECIALIZED_CAPABILITIES}\n\n${WCM_ERROR_SEMANTICS}`,
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     },
+    ...temporaryPermissionRouterTools(toolDeviceSchema()),
     ...plainAliases,
     ...routed,
   ];
@@ -262,6 +293,15 @@ function toolResult(data, isError = false, context = {}) {
   return classifyToolResult({
     content: [{ type: 'text', text: typeof data === 'string' ? data : JSON.stringify(data) }],
     isError,
+  }, context);
+}
+
+function structuredToolResult(data, { isError = false, meta = null, context = {} } = {}) {
+  return classifyToolResult({
+    content: [{ type: 'text', text: typeof data === 'string' ? data : JSON.stringify(data) }],
+    structuredContent: data,
+    ...(meta ? { _meta: meta } : {}),
+    ...(isError ? { isError: true } : {}),
   }, context);
 }
 
@@ -307,6 +347,16 @@ async function forwardDefaultResource(payload, sourcePayload = null) {
   return callWorker(registry.defaultDeviceId, payload, sourcePayload);
 }
 
+async function routeResource(payload, sourcePayload = null) {
+  const method = String(payload?.method || '');
+  const local = localTemporaryPermissionResource(payload);
+  if (local) return local;
+  const message = await forwardDefaultResource(payload, sourcePayload);
+  if (message?.error) return message;
+  if (method !== 'resources/list') return message;
+  return mergeTemporaryPermissionResourceList(message);
+}
+
 function selectedToolDevice(payload) {
   const args = payload?.params?.arguments;
   const deviceId = args && typeof args === 'object' ? args.deviceId : null;
@@ -315,22 +365,92 @@ function selectedToolDevice(payload) {
 }
 
 async function executeTool(payload, sourcePayload = null) {
-  if (payload?.params?.name === 'list_devices') {
+  const toolName = payload?.params?.name;
+  if (toolName === 'list_devices') {
     return toolResult({
       defaultDeviceId: registry.defaultDeviceId,
       devices: hub.listStatus(),
     });
+  }
+  if (toolName === 'request_temporary_permission') {
+    const args = payload?.params?.arguments || {};
+    const device = typeof args.deviceId === 'string' ? getDevice(args.deviceId) : null;
+    if (!device) {
+      return structuredToolResult({
+        error: args.deviceId
+          ? 'Unknown or disabled deviceId: ' + args.deviceId
+          : 'deviceId is required.',
+        devices: hub.listStatus(),
+      }, { isError: true });
+    }
+    try {
+      const prepared = permissionManager.request({
+        deviceId: device.deviceId,
+        justification: args.justification,
+      });
+      return structuredToolResult(prepared.request, {
+        meta: { approval_nonce: prepared.approvalNonce },
+      });
+    } catch (error) {
+      return structuredToolResult(
+        { error: String(error?.message || error) },
+        { isError: true },
+      );
+    }
+  }
+  if (toolName === 'resolve_temporary_permission') {
+    const args = payload?.params?.arguments || {};
+    try {
+      return structuredToolResult(permissionManager.resolve({
+        approvalId: args.approval_id,
+        approvalNonce: args.approval_nonce,
+        decision: args.decision,
+      }));
+    } catch (error) {
+      return structuredToolResult(
+        { error: String(error?.message || error) },
+        { isError: true },
+      );
+    }
+  }
+  if (toolName === 'temporary_permission_status') {
+    const args = payload?.params?.arguments || {};
+    return structuredToolResult(permissionManager.status({
+      permissionId: args.permissionId,
+      deviceId: args.deviceId,
+    }));
+  }
+  if (toolName === 'revoke_temporary_permission') {
+    const args = payload?.params?.arguments || {};
+    return structuredToolResult(permissionManager.revoke({
+      permissionId: args.permissionId,
+      deviceId: args.deviceId,
+    }));
   }
   const { args, deviceId, device } = selectedToolDevice(payload);
   if (!device) {
     const detail = deviceId ? 'Unknown or disabled deviceId: ' + deviceId : 'deviceId is required.';
     return toolResult({ error: detail, devices: hub.listStatus() }, true);
   }
+  const permission = permissionManager.validate({
+    permissionId: args?.permissionId,
+    deviceId: device.deviceId,
+  });
+  if (!permission.ok) {
+    return structuredToolResult({
+      error: 'A valid temporary permission is required for this device.',
+      permission_state: permission.state,
+      device_id: device.deviceId,
+      action: 'Call request_temporary_permission for this device and obtain user approval.',
+    }, {
+      isError: true,
+      context: { deviceOnline: Boolean(hub.connectionInfo(device.deviceId)) },
+    });
+  }
   const forwarded = stripModernMeta(payload);
   forwarded.params = { ...(forwarded.params || {}) };
   if (forwarded.params.name === 'read_file_plain') forwarded.params.name = 'read_file';
-  forwarded.params.arguments = { ...(args || {}) };
-  delete forwarded.params.arguments.deviceId;
+  forwarded.params.arguments = stripTemporaryPermissionRoutingArguments(args);
   forwarded.params.arguments = mapPathArguments(forwarded.params.arguments, device);
   try {
     const message = await callWorker(device.deviceId, forwarded, sourcePayload);
@@ -360,7 +480,7 @@ function modernDiscovery(id) {
     result: modernResult({
       supportedVersions: [MODERN_PROTOCOL],
       capabilities: { tools: { listChanged: true }, resources: {} },
-      instructions: `Every Desktop Commander tool requires an explicit deviceId. Default device: ${registry.defaultDeviceId}. Use list_devices when the target device is unknown, when current online status matters, or when diagnosing a connection failure.\n\n${SPECIALIZED_CAPABILITIES}\n\n${WCM_ERROR_SEMANTICS}`,
+      instructions: `Every Desktop Commander tool requires an explicit deviceId and a matching temporary permissionId. Default device: ${registry.defaultDeviceId}. Use list_devices to discover devices, then request_temporary_permission when a permission is missing or expired. Approved permissions last at most 6 hours and are device-bound.\n\n${SPECIALIZED_CAPABILITIES}\n\n${WCM_ERROR_SEMANTICS}`,
       ttlMs: 5000,
       cacheScope: 'private',
     }),
@@ -374,7 +494,7 @@ async function handleModern(payload, response) {
     return;
   }
   if (RESOURCE_METHODS.has(payload?.method)) {
-    const message = await forwardDefaultResource(payload, payload);
+    const message = await routeResource(payload, payload);
     const envelope = message.error
       ? { jsonrpc: '2.0', id, error: message.error }
       : { jsonrpc: '2.0', id, result: message.result || {} };
@@ -426,7 +546,7 @@ function legacyInitializeResult(payload) {
       protocolVersion: LEGACY_PROTOCOL,
       capabilities: { tools: { listChanged: true }, resources: {} },
       serverInfo,
-      instructions: `Every Desktop Commander tool requires an explicit deviceId. Default device: ${registry.defaultDeviceId}. Use list_devices when the target device is unknown, when current online status matters, or when diagnosing a connection failure.\n\n${SPECIALIZED_CAPABILITIES}\n\n${WCM_ERROR_SEMANTICS}`,
+      instructions: `Every Desktop Commander tool requires an explicit deviceId and a matching temporary permissionId. Default device: ${registry.defaultDeviceId}. Use list_devices to discover devices, then request_temporary_permission when a permission is missing or expired. Approved permissions last at most 6 hours and are device-bound.\n\n${SPECIALIZED_CAPABILITIES}\n\n${WCM_ERROR_SEMANTICS}`,
     },
   };
 }
@@ -454,7 +574,7 @@ async function handleLegacy(payload, request, response) {
     return;
   }
   if (RESOURCE_METHODS.has(payload?.method)) {
-    const message = await forwardDefaultResource(payload, session.initializePayload);
+    const message = await routeResource(payload, session.initializePayload);
     const envelope = message.error
       ? { jsonrpc: '2.0', id: payload.id, error: message.error }
       : { jsonrpc: '2.0', id: payload.id, result: message.result || {} };

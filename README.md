@@ -2,7 +2,7 @@
 
 Self-hosted multi-device Windows MCP controller for ChatGPT.
 
-One controller owns the public OAuth/Funnel endpoint. Local and remote workers expose Desktop Commander through the controller with an explicit `deviceId` on every routed tool call.
+One controller owns the public OAuth/Funnel endpoint. Local and remote workers expose Desktop Commander through the controller with an explicit `deviceId` and a device-bound temporary `permissionId` on every routed worker tool call.
 
 ## Architecture
 
@@ -54,7 +54,22 @@ See [`worker/README.md`](worker/README.md) for the dedicated Docker worker insta
 
 ## Tool routing
 
-The router adds `list_devices` and requires `deviceId` on every Desktop Commander tool. Example targets are `local-pc` and `remote-worker`.
+The router adds `list_devices` and requires both `deviceId` and a matching temporary `permissionId` on every Desktop Commander worker tool. Example targets are `local-pc` and `remote-worker`.
+
+Temporary permissions are approved explicitly in the WCM approval card and are bound to one device. The normal flow is:
+
+1. Call `list_devices` to identify the target.
+2. Call `request_temporary_permission` with that `deviceId`.
+3. The user approves or denies the request in the WCM approval card.
+4. Approval returns a new `permissionId`. Use it only with the same `deviceId`.
+5. The permission remains valid for at most six hours from the approval time. It is not automatically renewed.
+6. Call `revoke_temporary_permission` to invalidate it early, or request a new permission after expiry.
+
+`list_devices`, `request_temporary_permission`, `temporary_permission_status`, `revoke_temporary_permission`, and the approval card's `resolve_temporary_permission` action are router-owned and do not themselves require a temporary permission. The public `approval_id` is not an execution credential: approval also requires a hidden per-request nonce supplied only to the approval card, and the actual `permissionId` is generated only after approval.
+
+Approved permission state is stored under `.state/wcm-temporary-permissions.json` so a router restart does not silently revoke a still-valid six-hour grant. Only a SHA-256 hash of the bearer capability is persisted; the plaintext `permissionId` is never written to that state file or router audit log. Pending approval requests are memory-only and expire after 15 minutes by default.
+
+The supervisor reads `WC_TEMP_PERMISSION_TTL_SECONDS` and `WC_PERMISSION_APPROVAL_TTL_SECONDS` from `config/rdc.env` when present. Defaults are 21600 seconds (six hours) and 900 seconds (15 minutes), respectively. The router caps active permission TTL at six hours even if a larger value is configured.
 
 The router also advertises bundled specialized capabilities in MCP discovery, `list_devices`, and `start_process` descriptions so an LLM can discover them without pretending that each helper is a standalone MCP action. The current catalog contains two capabilities: Bilibili download under `tools/bilibili-download` (including its bridge and bundled `yt-dlp.exe` fallback) and Quark transfer under `tools/quark-transfer`. Their READMEs remain the source of truth for invocation details and authentication requirements.
 
@@ -67,7 +82,7 @@ npm test
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\rdc-status.ps1
 ```
 
-`npm test` is self-contained with respect to test data/config, but do not launch it through the same live WCM connection that is controlling this checkout: doing so can interrupt that worker/gateway transport and cause temporary HTTP 502s. Run it from an independent local terminal instead. It covers OAuth state pruning/caps, worker heartbeat expiry, and reconnect isolation.
+`npm test` is self-contained with respect to test data/config, but do not launch it through the same live WCM connection that is controlling this checkout: doing so can interrupt that worker/gateway transport and cause temporary HTTP 502s. Run it from an independent local terminal instead. It covers temporary-permission issuance/expiry/revocation/persistence, OAuth state pruning/caps, worker heartbeat expiry, and reconnect isolation.
 
 To exercise an already configured live controller and sidecar, run:
 
@@ -75,7 +90,7 @@ To exercise an already configured live controller and sidecar, run:
 npm run test:live
 ```
 
-The live suite covers legacy OAuth/stateful MCP, MCP `2026-07-28`, device routing, resources, and duplicate external JSON-RPC IDs. It uses the configured OAuth deployment and can register test clients, so it is intentionally separate from the default CI test.
+The live suite covers legacy OAuth/stateful MCP, MCP `2026-07-28`, temporary-permission request/approval/revocation, device routing, resources, and duplicate external JSON-RPC IDs. It uses the configured OAuth deployment and can register test clients and short-lived WCM permissions, so it is intentionally separate from the default CI test.
 
 The public endpoint is configured by `RDC_RESOURCE`. With a Tailscale Funnel hostname it typically looks like:
 
@@ -108,7 +123,9 @@ When a live WCM deployment behaves differently from the checked-out code, debug 
 
 WCM can execute commands and access files on registered devices. Expose only the OAuth-protected sidecar through your HTTPS ingress; keep the router and worker hubs private to localhost/Tailscale. Remote worker admission relies on the registered Tailscale source IP, so treat your tailnet and `config/devices.json` as part of the trust boundary.
 
-Secrets, OAuth state, worker-local configuration, runtime logs, and `node_modules` are excluded from Git. Never commit the generated `config/rdc.env`, `config/devices.json`, `config/worker-*.env`, or `.state/` contents.
+Temporary `permissionId` values are bearer capabilities. Do not paste them into logs, source files, tickets, or other persistent storage. WCM audit records use only a short hash fingerprint, and persisted grant records contain only the full hash plus device/timing metadata.
+
+Secrets, OAuth state, temporary-permission state, worker-local configuration, runtime logs, and `node_modules` are excluded from Git. Never commit the generated `config/rdc.env`, `config/devices.json`, `config/worker-*.env`, or `.state/` contents.
 
 
 ## License

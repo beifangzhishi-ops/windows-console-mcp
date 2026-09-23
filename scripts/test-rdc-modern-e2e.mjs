@@ -133,12 +133,21 @@ async function runModern(approvalSecret) {
   if (!Array.isArray(tools) || tools.length < 20) throw new Error('tools/list returned too few tools.');
   const listDevicesTool = tools.find((tool) => tool?.name === 'list_devices');
   const getConfigTool = tools.find((tool) => tool?.name === 'get_config');
-  if (!listDevicesTool || !getConfigTool) throw new Error('required routed tools were not listed.');
+  const requestPermissionTool = tools.find((tool) => tool?.name === 'request_temporary_permission');
+  if (!listDevicesTool || !getConfigTool || !requestPermissionTool) {
+    throw new Error('required routed tools were not listed.');
+  }
   if (!listDevicesTool.description?.includes('network connectivity can be transiently unstable')) {
     throw new Error('list_devices did not advertise transient network error semantics.');
   }
   if (!getConfigTool.inputSchema?.required?.includes('deviceId')) {
     throw new Error('get_config does not require deviceId.');
+  }
+  if (!getConfigTool.inputSchema?.required?.includes('permissionId')) {
+    throw new Error('get_config does not require permissionId.');
+  }
+  if (requestPermissionTool._meta?.['openai/outputTemplate'] !== 'ui://wcm/temporary-permission-v1.html') {
+    throw new Error('request_temporary_permission did not expose the WCM approval card.');
   }
   for (const name of ['read_file', 'edit_block']) {
     const tool = tools.find((candidate) => candidate?.name === name);
@@ -160,27 +169,68 @@ async function runModern(approvalSecret) {
   const targetDeviceId = deviceInfo?.defaultDeviceId || deviceInfo?.devices?.find((item) => item?.online)?.deviceId;
   if (!targetDeviceId) throw new Error('list_devices did not expose an online/default device.');
 
-  const targetConfig = await mcp(accessToken, 4, 'tools/call', {
-    name: 'get_config', arguments: { deviceId: targetDeviceId },
+  const permissionRequest = await mcp(accessToken, 4, 'tools/call', {
+    name: 'request_temporary_permission',
+    arguments: {
+      deviceId: targetDeviceId,
+      justification: 'RDC modern E2E temporary permission.',
+    },
+  });
+  const approvalId = permissionRequest?.structuredContent?.approval_id;
+  const approvalNonce = permissionRequest?._meta?.approval_nonce;
+  if (!approvalId || !approvalNonce) {
+    throw new Error('temporary permission request did not return approval details.');
+  }
+  const permissionApproval = await mcp(accessToken, 5, 'tools/call', {
+    name: 'resolve_temporary_permission',
+    arguments: {
+      approval_id: approvalId,
+      approval_nonce: approvalNonce,
+      decision: 'approve',
+    },
+  });
+  const permissionId = permissionApproval?.structuredContent?.permission_id;
+  if (!permissionId) throw new Error('temporary permission approval did not issue permission_id.');
+
+  const targetConfig = await mcp(accessToken, 6, 'tools/call', {
+    name: 'get_config',
+    arguments: { deviceId: targetDeviceId, permissionId },
   });
   if (targetConfig?.isError === true || !Array.isArray(targetConfig?.content)) {
     throw new Error(`get_config(deviceId=${targetDeviceId}) failed.`);
   }
 
-  const resourcesResult = await mcp(accessToken, 5, 'resources/list', {});
+  const resourcesResult = await mcp(accessToken, 7, 'resources/list', {});
   const resources = resourcesResult?.resources;
   const filePreviewUri = 'ui://desktop-commander/file-preview';
+  const permissionUiUri = 'ui://wcm/temporary-permission-v1.html';
   if (!Array.isArray(resources) || !resources.some((item) => item?.uri === filePreviewUri)) {
     throw new Error('resources/list did not include file preview UI.');
   }
-  const resourceRead = await mcp(accessToken, 6, 'resources/read', { uri: filePreviewUri });
+  if (!resources.some((item) => item?.uri === permissionUiUri)) {
+    throw new Error('resources/list did not include WCM temporary permission UI.');
+  }
+  const resourceRead = await mcp(accessToken, 8, 'resources/read', { uri: filePreviewUri });
   const html = resourceRead?.contents?.[0]?.text || '';
   if (!html.includes('<html') && !html.includes('<!DOCTYPE html')) {
     throw new Error('resources/read did not return the file preview HTML.');
   }
-  const templates = await mcp(accessToken, 7, 'resources/templates/list', {});
+  const permissionUi = await mcp(accessToken, 9, 'resources/read', { uri: permissionUiUri });
+  const permissionHtml = permissionUi?.contents?.[0]?.text || '';
+  if (!permissionHtml.includes('WCM temporary permission')) {
+    throw new Error('resources/read did not return WCM temporary permission HTML.');
+  }
+  const templates = await mcp(accessToken, 10, 'resources/templates/list', {});
   if (!Array.isArray(templates?.resourceTemplates)) {
     throw new Error('resources/templates/list did not return an array.');
+  }
+
+  const permissionRevoke = await mcp(accessToken, 11, 'tools/call', {
+    name: 'revoke_temporary_permission',
+    arguments: { deviceId: targetDeviceId, permissionId },
+  });
+  if (permissionRevoke?.structuredContent?.state !== 'revoked') {
+    throw new Error('temporary permission could not be revoked.');
   }
   stage = 'revocation';
   const revoke = await request('/rdc/revoke', {

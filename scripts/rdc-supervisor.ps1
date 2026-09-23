@@ -13,6 +13,7 @@ if(-not $localDevice){ throw 'config\devices.json does not define an enabled loc
 $localDeviceId = [string]$localDevice.deviceId
 $workerEnv = Join-Path $repoRoot ("config\worker-{0}.env" -f $localDeviceId)
 $workerPidFile = Join-Path $stateDir ("rdc-worker-{0}.pid" -f $localDeviceId)
+$supervisorPidFile = Join-Path $stateDir 'rdc-supervisor.pid'
 $node = (Get-Command node.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
 $tailscale = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'
 $router = Join-Path $repoRoot 'router\server.mjs'
@@ -26,6 +27,7 @@ foreach($p in @($configFile,$devicesFile,$workerEnv,$router,$worker,$sidecar)){
 $createdNew = $false
 $mutex = New-Object System.Threading.Mutex($true, 'Global\DesktopCommanderSelfhostGateway', [ref]$createdNew)
 if (-not $createdNew) { $mutex.Dispose(); exit 0 }
+Set-Content -LiteralPath $supervisorPidFile -Value $PID -Encoding ASCII
 $selfInfo = Get-CimInstance Win32_Process -Filter "ProcessId=$PID"
 $launcherPid = [int]$selfInfo.ParentProcessId
 $launcherInfo = Get-CimInstance Win32_Process -Filter "ProcessId=$launcherPid" -ErrorAction SilentlyContinue
@@ -77,6 +79,13 @@ try {
             if(-not $tailIp){ throw 'Tailscale IPv4 was unavailable.' }
             $env:WC_WORKER_REMOTE_HOST = $tailIp
             $env:WC_WORKER_REMOTE_PORT = '18100'
+            foreach($name in @('WC_TEMP_PERMISSION_TTL_SECONDS','WC_PERMISSION_APPROVAL_TTL_SECONDS')){
+                $line = Get-Content -LiteralPath $configFile | Where-Object { $_ -match ("^\s*" + [regex]::Escape($name) + "\s*=") } | Select-Object -First 1
+                if($line){
+                    $value = ($line -replace ("^\s*" + [regex]::Escape($name) + "\s*=\s*"),'').Trim()
+                    if($value){ [Environment]::SetEnvironmentVariable($name,$value,'Process') }
+                }
+            }
             foreach($port in @(18009,18101,18100,18008)){
                 if(Listener $port){ throw "Port $port is already in use; refusing to claim it." }
             }
@@ -109,6 +118,7 @@ try {
     }
 }
 finally {
+    Remove-Item -LiteralPath $supervisorPidFile -Force -ErrorAction SilentlyContinue
     try { $mutex.ReleaseMutex() } catch {}
     $mutex.Dispose()
 }

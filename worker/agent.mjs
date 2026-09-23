@@ -3,7 +3,11 @@ import net from 'node:net';
 import path from 'node:path';
 import readline from 'node:readline';
 import { spawn } from 'node:child_process';
-import { guardDesktopCommanderMessage, resolveMaxDcResponseBytes } from './response-guard.mjs';
+import {
+  guardDesktopCommanderMessage,
+  resolveMaxDcResponseBytes,
+  shouldGuardDesktopCommanderResponse,
+} from './response-guard.mjs';
 
 function parseEnv(content) {
   const out = {};
@@ -74,11 +78,13 @@ function startDesktopCommander() {
     let message;
     try { message = JSON.parse(text); }
     catch { return; }
-    message = guardDesktopCommanderMessage(message, Buffer.byteLength(text, 'utf8'), maxDcResponseBytes);
     if (message?.id === undefined || message?.id === null) return;
     const key = rpcKey(message.id);
     const pending = pendingByRpcId.get(key);
     if (!pending) return;
+    if (shouldGuardDesktopCommanderResponse(pending.method)) {
+      message = guardDesktopCommanderMessage(message, Buffer.byteLength(text, 'utf8'), maxDcResponseBytes);
+    }
     pendingByRpcId.delete(key);
     writeFrame({
       type: 'response',
@@ -114,6 +120,7 @@ function sendToDesktopCommander(frame) {
     pendingByRpcId.set(rpcKey(workerRpcId), {
       requestId: frame.requestId,
       originalRpcId: payload.id,
+      method: String(payload.method || ''),
     });
     outbound = { ...payload, id: workerRpcId };
   }

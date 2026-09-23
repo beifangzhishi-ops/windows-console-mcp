@@ -153,13 +153,27 @@ if (!factory.includes('WCM_IMAGE_GUARD_V1')) {
 let stdio = fs.readFileSync(stdioFile, 'utf8');
 const oldStdioAllowBlock = `                    // This looks like a valid JSON-RPC message, allow it
                     return this.originalStdoutWrite.call(process.stdout, buffer, encoding, callback);`;
-const newStdioAllowBlock = `                    // WCM_STDOUT_RESPONSE_GUARD_V1: bound complete JSON-RPC lines before forwarding.
+const newStdioAllowBlock = `                    // WCM_STDOUT_RESPONSE_GUARD_V2: bound complete JSON-RPC lines before forwarding.
                     const configuredLimit = Number.parseInt(process.env.DESKTOP_COMMANDER_MAX_STDOUT_JSON_BYTES || '524288', 10);
                     const maxBytes = Number.isFinite(configuredLimit) && configuredLimit >= 65536 ? configuredLimit : 524288;
+                     const configuredAppResourceLimit = Number.parseInt(process.env.DESKTOP_COMMANDER_MAX_APP_RESOURCE_BYTES || '2097152', 10);
+                     const maxAppResourceBytes = Number.isFinite(configuredAppResourceLimit) && configuredAppResourceLimit >= maxBytes
+                         ? configuredAppResourceLimit
+                         : 2097152;
                     const responseBytes = Buffer.byteLength(buffer, 'utf8');
                     if (responseBytes > maxBytes) {
                         try {
                             const message = JSON.parse(trimmed);
+                             const contents = message?.result?.contents;
+                             const isMcpAppResource = Array.isArray(contents) && contents.length > 0 &&
+                                 contents.every((item) =>
+                                     typeof item?.uri === 'string' &&
+                                     item.uri.startsWith('ui://') &&
+                                     item?.mimeType === 'text/html;profile=mcp-app'
+                                 );
+                             if (isMcpAppResource && responseBytes <= maxAppResourceBytes) {
+                                 return this.originalStdoutWrite.call(process.stdout, buffer, encoding, callback);
+                             }
                             if (message && message.id !== undefined && message.id !== null) {
                                 const guarded = JSON.stringify({
                                     jsonrpc: message.jsonrpc || '2.0',
@@ -181,7 +195,14 @@ const newStdioAllowBlock = `                    // WCM_STDOUT_RESPONSE_GUARD_V1:
                     }
                     return this.originalStdoutWrite.call(process.stdout, buffer, encoding, callback);`;
 
-if (!stdio.includes('WCM_STDOUT_RESPONSE_GUARD_V1')) {
+if (stdio.includes('WCM_STDOUT_RESPONSE_GUARD_V1') && !stdio.includes('WCM_STDOUT_RESPONSE_GUARD_V2')) {
+  const v1Start = stdio.indexOf('                    // WCM_STDOUT_RESPONSE_GUARD_V1:');
+  const v1EndMarker = '                    return this.originalStdoutWrite.call(process.stdout, buffer, encoding, callback);';
+  const v1End = stdio.indexOf(v1EndMarker, v1Start);
+  if (v1Start < 0 || v1End < 0) throw new Error('custom-stdio.js V1 guard layout changed; refusing unsafe migration.');
+  stdio = stdio.slice(0, v1Start) + newStdioAllowBlock + stdio.slice(v1End + v1EndMarker.length);
+  fs.writeFileSync(stdioFile, stdio, 'utf8');
+} else if (!stdio.includes('WCM_STDOUT_RESPONSE_GUARD_V2')) {
   if (!stdio.includes(oldStdioAllowBlock)) throw new Error('custom-stdio.js layout changed; refusing unsafe patch.');
   stdio = stdio.replace(oldStdioAllowBlock, newStdioAllowBlock);
   fs.writeFileSync(stdioFile, stdio, 'utf8');

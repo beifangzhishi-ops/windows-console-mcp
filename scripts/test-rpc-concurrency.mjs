@@ -23,7 +23,24 @@ async function call(name, args) {
     clearTimeout(timer);
   }
 }
-const platformResult = await call('get_config', { deviceId });
+const permissionRequest = await call('request_temporary_permission', {
+  deviceId,
+  justification: 'RPC concurrency regression temporary permission.',
+});
+const approvalId = permissionRequest?.structuredContent?.approval_id;
+const approvalNonce = permissionRequest?._meta?.approval_nonce;
+if (!approvalId || !approvalNonce) {
+  throw new Error('Temporary permission request did not return approval details.');
+}
+const permissionApproval = await call('resolve_temporary_permission', {
+  approval_id: approvalId,
+  approval_nonce: approvalNonce,
+  decision: 'approve',
+});
+const permissionId = permissionApproval?.structuredContent?.permission_id;
+if (!permissionId) throw new Error('Temporary permission approval did not issue permission_id.');
+
+const platformResult = await call('get_config', { deviceId, permissionId });
 const platformText = platformResult?.content?.[0]?.text || '';
 const jsonStart = platformText.indexOf('{');
 if (jsonStart < 0) throw new Error('Target get_config response did not contain JSON.');
@@ -34,22 +51,25 @@ const isWindows = platformConfig?.systemInfo?.isWindows === true;
 const slowArgs = isWindows
   ? {
       deviceId,
+      permissionId,
       command: "Start-Sleep -Milliseconds 500; Write-Output CONCURRENCY_SLOW_OK",
       timeout_ms: 3000,
       shell: 'powershell.exe',
     }
   : {
       deviceId,
+      permissionId,
       command: "sleep 0.5; printf 'CONCURRENCY_SLOW_OK\\n'",
       timeout_ms: 3000,
       shell: '/bin/sh',
     };
 const [slow, config] = await Promise.all([
   call('start_process', slowArgs),
-  call('get_config', { deviceId }),
+  call('get_config', { deviceId, permissionId }),
 ]);
 const slowText = slow?.content?.[0]?.text || '';
 const configText = config?.content?.[0]?.text || '';
 if (!slowText.includes('CONCURRENCY_SLOW_OK')) throw new Error('start_process response was mismatched or incomplete.');
 if (!configText.includes('blockedCommands')) throw new Error('get_config response was mismatched or incomplete.');
+await call('revoke_temporary_permission', { deviceId, permissionId });
 console.log(`RPC concurrency regression passed for ${deviceId}: duplicate external id=0 remained correctly correlated.`);
