@@ -364,6 +364,13 @@ function selectedToolDevice(payload) {
   return { args, deviceId, device };
 }
 
+function hostSessionFor(payload, sourcePayload = null) {
+  const direct = payload?.params?._meta?.['openai/session'];
+  if (direct != null && direct !== '') return String(direct);
+  const source = sourcePayload?.params?._meta?.['openai/session'];
+  return source == null || source === '' ? null : String(source);
+}
+
 async function executeTool(payload, sourcePayload = null) {
   const toolName = payload?.params?.name;
   if (toolName === 'list_devices') {
@@ -387,6 +394,7 @@ async function executeTool(payload, sourcePayload = null) {
       const prepared = permissionManager.request({
         deviceId: device.deviceId,
         justification: args.justification,
+        hostSession: hostSessionFor(payload, sourcePayload),
       });
       return structuredToolResult(prepared.request, {
         meta: { approval_nonce: prepared.approvalNonce },
@@ -405,6 +413,7 @@ async function executeTool(payload, sourcePayload = null) {
         approvalId: args.approval_id,
         approvalNonce: args.approval_nonce,
         decision: args.decision,
+        hostSession: hostSessionFor(payload, sourcePayload),
       }));
     } catch (error) {
       return structuredToolResult(

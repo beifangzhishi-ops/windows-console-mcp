@@ -11,6 +11,31 @@ export function temporaryPermissionSchema() {
   };
 }
 
+function temporaryPermissionOutputSchema() {
+  return {
+    type: 'object',
+    properties: {
+      approval_required: { type: 'boolean' },
+      approval_id: { type: 'string' },
+      operation_id: { type: 'string' },
+      state: {
+        type: 'string',
+        enum: ['pending', 'dispatching', 'approved_retryable', 'execution_unknown', 'denied', 'consumed'],
+      },
+      device_id: { type: 'string' },
+      justification: { type: 'string' },
+      requested_duration_seconds: { type: 'number' },
+      approval_expires_at: { type: 'string' },
+      expires_at: { type: 'string' },
+      intent_sha256: { type: 'string' },
+      permission_id: { type: 'string' },
+      issued_at: { type: 'string' },
+      error: { type: 'string' },
+    },
+    additionalProperties: true,
+  };
+}
+
 export function withTemporaryPermissionRoutingSchema(inputSchema, deviceSchema) {
   const schema = inputSchema && typeof inputSchema === 'object'
     ? structuredClone(inputSchema)
@@ -34,6 +59,11 @@ export function temporaryPermissionRouterTools(deviceSchema) {
     {
       name: 'request_temporary_permission',
       description: 'Request user approval for temporary access to one WCM device. Approval is completed in the WCM approval card; approved permissions last at most 6 hours.',
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false,
+      },
       inputSchema: {
         type: 'object',
         properties: {
@@ -46,6 +76,7 @@ export function temporaryPermissionRouterTools(deviceSchema) {
         required: ['deviceId'],
         additionalProperties: false,
       },
+      outputSchema: temporaryPermissionOutputSchema(),
       _meta: {
         ui: { resourceUri: TEMP_PERMISSION_UI_URI, visibility: ['model', 'app'] },
         'ui/resourceUri': TEMP_PERMISSION_UI_URI,
@@ -56,16 +87,26 @@ export function temporaryPermissionRouterTools(deviceSchema) {
     {
       name: 'resolve_temporary_permission',
       description: 'Resolve a pending WCM temporary-permission request. Intended for the WCM approval card; requires the hidden approval nonce.',
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        openWorldHint: false,
+      },
+      _meta: {
+        ui: { visibility: ['app'] },
+        'openai/widgetAccessible': true,
+      },
       inputSchema: {
         type: 'object',
         properties: {
-          approval_id: { type: 'string', minLength: 1 },
-          approval_nonce: { type: 'string', minLength: 1 },
+          approval_id: { type: 'string', format: 'uuid' },
+          approval_nonce: { type: 'string', minLength: 20 },
           decision: { type: 'string', enum: ['approve', 'deny'] },
         },
         required: ['approval_id', 'approval_nonce', 'decision'],
         additionalProperties: false,
       },
+      outputSchema: temporaryPermissionOutputSchema(),
     },
     {
       name: 'temporary_permission_status',

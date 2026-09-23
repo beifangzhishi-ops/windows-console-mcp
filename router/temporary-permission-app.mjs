@@ -111,7 +111,9 @@ export const TEMP_PERMISSION_UI_HTML = String.raw`<!doctype html>
           source: "wcm.temporary_permission",
           decision,
           approval_id: structured?.approval_id,
+          operation_id: structured?.operation_id,
           state: structured?.state,
+          intent_sha256: structured?.intent_sha256,
           permission_id: structured?.permission_id,
           device_id: structured?.device_id,
           issued_at: structured?.issued_at,
@@ -119,7 +121,7 @@ export const TEMP_PERMISSION_UI_HTML = String.raw`<!doctype html>
         };
         const contextText = decision === "deny"
           ? "The user denied the WCM temporary permission request."
-          : "The user approved WCM temporary permission. Use the permission_id only for the matching device until expires_at.";
+          : "The user approved the frozen WCM temporary-permission action. WCM issued the permission without a second model approval request; use permission_id only for the matching device until expires_at.";
         try {
           await request("ui/update-model-context", {
             content: [{ type: "text", text: contextText }],
@@ -147,9 +149,28 @@ export const TEMP_PERMISSION_UI_HTML = String.raw`<!doctype html>
             }
           }, 30000);
           const structured = result?.structuredContent || {};
+          approval = { ...approval, ...structured };
+          if (structured.state === "approved_retryable") {
+            approve.textContent = "Retry approved permission";
+            setStatus(
+              structured.error ||
+                "The permission was not issued. You can retry the same frozen approved action.",
+              true
+            );
+            setBusy(false);
+            deny.disabled = false;
+            return;
+          }
+          if (structured.state === "execution_unknown") {
+            setStatus(
+              structured.error ||
+                "Permission issuance outcome is unknown. WCM will not retry automatically.",
+              true
+            );
+          } else
           if (structured.state === "denied") {
             setStatus("Denied. No permission was issued.");
-          } else if (structured.state === "approved") {
+          } else if (structured.state === "consumed" && structured.permission_id) {
             setStatus("Approved until " + (structured.expires_at || "") + ".");
           } else {
             setStatus("Permission decision returned an unexpected state.", true);

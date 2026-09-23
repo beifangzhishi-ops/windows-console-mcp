@@ -30,25 +30,38 @@ try {
   const prepared = manager.request({
     deviceId: 'device-a',
     justification: 'Test temporary access.',
+    hostSession: 'host-session-a',
   });
   assert.equal(prepared.request.state, 'pending');
   assert.equal(prepared.request.device_id, 'device-a');
   assert.equal(prepared.request.requested_duration_seconds, 21600);
   assert.ok(prepared.request.approval_id);
+  assert.ok(prepared.request.operation_id);
+  assert.match(prepared.request.intent_sha256, /^[a-f0-9]{64}$/);
   assert.ok(prepared.approvalNonce);
   assert.throws(() => manager.resolve({
     approvalId: prepared.request.approval_id,
     approvalNonce: 'wrong',
     decision: 'approve',
+    hostSession: 'host-session-a',
   }), /Invalid approval token/);
+  assert.throws(() => manager.resolve({
+    approvalId: prepared.request.approval_id,
+    approvalNonce: prepared.approvalNonce,
+    decision: 'approve',
+    hostSession: 'host-session-b',
+  }), /different host session/);
 
   now += 60_000;
   const approved = manager.resolve({
     approvalId: prepared.request.approval_id,
     approvalNonce: prepared.approvalNonce,
     decision: 'approve',
+    hostSession: 'host-session-a',
   });
-  assert.equal(approved.state, 'approved');
+  assert.equal(approved.state, 'consumed');
+  assert.equal(approved.operation_id, prepared.request.operation_id);
+  assert.equal(approved.intent_sha256, prepared.request.intent_sha256);
   assert.match(approved.permission_id, /^wcm_perm_/);
   assert.equal(
     Date.parse(approved.expires_at) - Date.parse(approved.issued_at),
@@ -58,7 +71,8 @@ try {
     approvalId: prepared.request.approval_id,
     approvalNonce: prepared.approvalNonce,
     decision: 'approve',
-  }), /Unknown or expired approval_id/);
+    hostSession: 'host-session-a',
+  }), /state=consumed/);
 
   const stateText = fs.readFileSync(stateFile, 'utf8');
   assert.doesNotMatch(stateText, new RegExp(approved.permission_id));
@@ -145,6 +159,8 @@ try {
   assert.match(TEMP_PERMISSION_UI_HTML, /Approve for/);
   assert.match(TEMP_PERMISSION_UI_HTML, /approval_nonce/);
   assert.match(TEMP_PERMISSION_UI_HTML, /resolve_temporary_permission/);
+  assert.match(TEMP_PERMISSION_UI_HTML, /approved_retryable/);
+  assert.match(TEMP_PERMISSION_UI_HTML, /execution_unknown/);
   assert.match(TEMP_PERMISSION_UI_HTML, /ui\/update-model-context/);
   assert.ok(audit.some((event) => event.event === 'permission_requested'));
   assert.ok(audit.some((event) => event.event === 'permission_approved'));

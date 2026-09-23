@@ -35,7 +35,14 @@ assert.ok(requestTool && resolveTool && statusTool && revokeTool);
 assert.deepEqual(requestTool.inputSchema.required, ['deviceId']);
 assert.equal(requestTool._meta?.['openai/outputTemplate'], TEMP_PERMISSION_UI_URI);
 assert.equal(requestTool._meta?.['openai/widgetAccessible'], true);
+assert.deepEqual(requestTool._meta?.ui?.visibility, ['model', 'app']);
+assert.ok(requestTool.outputSchema?.properties?.operation_id);
 assert.ok(resolveTool.inputSchema.required.includes('approval_nonce'));
+assert.deepEqual(resolveTool._meta?.ui?.visibility, ['app']);
+assert.equal(resolveTool._meta?.['openai/widgetAccessible'], true);
+assert.equal(resolveTool.inputSchema.properties.approval_id.format, 'uuid');
+assert.equal(resolveTool.inputSchema.properties.approval_nonce.minLength, 20);
+assert.ok(resolveTool.outputSchema?.properties?.permission_id);
 assert.deepEqual(statusTool.inputSchema.required.sort(), ['deviceId', 'permissionId'].sort());
 assert.deepEqual(revokeTool.inputSchema.required.sort(), ['deviceId', 'permissionId'].sort());
 
@@ -73,6 +80,7 @@ const localResource = localTemporaryPermissionResource({
 });
 assert.equal(localResource?.result?.contents?.[0]?.mimeType, 'text/html;profile=mcp-app');
 assert.match(localResource?.result?.contents?.[0]?.text || '', /WCM temporary permission/);
+assert.equal(localResource?.result?.contents?.[0]?._meta?.ui?.prefersBorder, true);
 assert.equal(localTemporaryPermissionResource({
   method: 'resources/read',
   params: { uri: 'ui://worker/existing' },
