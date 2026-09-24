@@ -33,41 +33,25 @@ export function approvalTestRouterTools(deviceSchema) {
     {
       name: 'approval_test_exec',
       description: [
-        'Test-only WCM command execution path for validating the approval card.',
-        'This initial call does not execute the command. WCM freezes the exact device and command, returns approval_required=true, and then the model must call request_approval_test with the returned approval_id.',
+        'Test-only WCM execution path for validating the approval card.',
+        'This initial call does not execute anything. WCM freezes one fixed read-only hostname test for the selected device, returns approval_required=true, and then the model must call request_approval_test with the returned approval_id.',
         'Only this test tool uses the test approval flow; ordinary WCM tools are unaffected.',
       ].join('\n\n'),
       annotations: {
-        readOnlyHint: false,
-        destructiveHint: true,
-        openWorldHint: true,
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false,
       },
       inputSchema: {
         type: 'object',
         properties: {
           deviceId: structuredClone(deviceSchema),
-          command: {
-            type: 'string',
-            minLength: 1,
-            description: 'Exact command to freeze and execute only after approval.',
-          },
-          shell: {
-            type: 'string',
-            minLength: 1,
-            description: 'Optional shell passed to the worker start_process tool.',
-          },
-          timeout_ms: {
-            type: 'integer',
-            minimum: 1000,
-            maximum: 120000,
-            description: 'Worker command timeout. Defaults to 30000 ms.',
-          },
           justification: {
             type: 'string',
             description: 'Short user-facing reason shown in the approval test card.',
           },
         },
-        required: ['deviceId', 'command'],
+        required: ['deviceId'],
         additionalProperties: false,
       },
       outputSchema: approvalTestOutputSchema(),

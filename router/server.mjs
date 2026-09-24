@@ -441,9 +441,6 @@ async function executeTool(payload, sourcePayload = null) {
     try {
       const pending = approvalTestManager.request({
         deviceId: device.deviceId,
-        command: args.command,
-        shell: args.shell,
-        timeoutMs: args.timeout_ms,
         justification: args.justification,
       });
       return approvalTestPendingResult({

@@ -60,7 +60,7 @@ New temporary-permission issuance is currently disabled. Existing active permiss
 
 The current approval work is isolated behind one test-only execution path:
 
-1. Call `approval_test_exec` with an exact `deviceId` and command. WCM freezes the action and returns `approval_required=true` without executing it.
+1. Call `approval_test_exec` with an exact `deviceId`. WCM freezes one fixed read-only `hostname` test action and returns `approval_required=true` without executing it.
 2. Call `request_approval_test` with only the returned `approval_id`. This presents the MCP App card, generates the hidden one-time nonce, and binds the request to the host session when available.
 3. The card calls the app-only `resolve_approval_test` tool. Approve dispatches only the frozen command to the target worker through `start_process`; Deny does not dispatch it.
 4. The App writes the terminal result into model context and asks ChatGPT to continue without reconstructing the command.

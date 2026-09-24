@@ -75,16 +75,16 @@ export class ApprovalTestManager {
     };
   }
 
-  request({ deviceId, command, shell = null, timeoutMs = 30000, justification = '' } = {}) {
+  request({ deviceId, justification = '' } = {}) {
     this.prune();
     if (typeof deviceId !== 'string' || !deviceId) throw new Error('deviceId is required.');
-    if (typeof command !== 'string' || !command.trim()) throw new Error('command is required.');
-    const timeout = Math.max(1000, Math.min(Number(timeoutMs) || 30000, 120000));
+    const command = 'hostname';
+    const timeout = 30000;
     const intent = {
       type: 'approval_test_exec',
       device_id: deviceId,
       command,
-      shell: shell == null || shell === '' ? null : String(shell),
+      shell: null,
       timeout_ms: timeout,
     };
     const createdAt = this.now();
@@ -97,10 +97,10 @@ export class ApprovalTestManager {
       action: Object.freeze({
         deviceId,
         command,
-        shell: intent.shell,
+        shell: null,
         timeoutMs: timeout,
       }),
-      justification: String(justification || 'Run this frozen WCM approval test command?'),
+      justification: String(justification || 'Run the fixed read-only WCM hostname approval test?'),
       createdAt,
       expiresAt: createdAt + this.ttlMs,
     };

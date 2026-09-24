@@ -14,16 +14,13 @@ const manager = new ApprovalTestManager({
 
 const pending = manager.request({
   deviceId: 'device-a',
-  command: 'printf APPROVAL_TEST_OK',
-  shell: '/bin/sh',
-  timeoutMs: 5000,
   justification: 'Test the WCM approval card.',
 });
 
 assert.equal(pending.state, 'pending');
 assert.equal(pending.approval_required, true);
 assert.equal(pending.device_id, 'device-a');
-assert.equal(pending.command, 'printf APPROVAL_TEST_OK');
+assert.equal(pending.command, 'hostname');
 assert.ok(pending.approval_id);
 assert.ok(pending.operation_id);
 assert.match(pending.intent_sha256, /^[a-f0-9]{64}$/);
@@ -53,9 +50,9 @@ const claimed = manager.claim(
 assert.equal(claimed.request.state, 'dispatching');
 assert.deepEqual(claimed.action, {
   deviceId: 'device-a',
-  command: 'printf APPROVAL_TEST_OK',
-  shell: '/bin/sh',
-  timeoutMs: 5000,
+  command: 'hostname',
+  shell: null,
+  timeoutMs: 30000,
 });
 const consumed = manager.markConsumed(pending.approval_id);
 assert.equal(consumed.state, 'consumed');
@@ -65,12 +62,12 @@ assert.throws(() => manager.claim(
   'host-a',
 ), /state=consumed/);
 
-const denyPending = manager.request({ deviceId: 'device-a', command: 'echo NO' });
+const denyPending = manager.request({ deviceId: 'device-a' });
 const denyPrepared = manager.prepareAppApproval(denyPending.approval_id, { hostSession: 'host-a' });
 const denied = manager.deny(denyPending.approval_id, denyPrepared.approvalNonce, 'host-a');
 assert.equal(denied.state, 'denied');
 
-const expiring = manager.request({ deviceId: 'device-a', command: 'echo EXPIRE' });
+const expiring = manager.request({ deviceId: 'device-a' });
 now = Date.parse(expiring.expires_at);
 assert.throws(() => manager.prepareAppApproval(expiring.approval_id), /Unknown or expired approval_id/);
 

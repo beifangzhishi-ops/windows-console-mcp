@@ -45,7 +45,8 @@ const requestCard = approvalTools.find((tool) => tool.name === 'request_approval
 const resolver = approvalTools.find((tool) => tool.name === 'resolve_approval_test');
 assert.ok(testExec && requestCard && resolver);
 assert.equal(testExec._meta, undefined);
-assert.deepEqual(testExec.inputSchema.required, ['deviceId', 'command']);
+assert.deepEqual(testExec.inputSchema.required, ['deviceId']);
+assert.equal(testExec.inputSchema.properties.command, undefined);
 assert.deepEqual(requestCard.inputSchema.required, ['approval_id']);
 assert.equal(requestCard._meta?.['openai/outputTemplate'], APPROVAL_TEST_UI_URI);
 assert.equal(requestCard._meta?.['openai/widgetAccessible'], true);

@@ -186,7 +186,6 @@ async function runModern(approvalSecret) {
     name: 'approval_test_exec',
     arguments: {
       deviceId: targetDeviceId,
-      command: 'echo WCM_APPROVAL_TEST_OK',
       justification: 'RDC modern E2E approval test.',
     },
   });
@@ -237,7 +236,7 @@ async function runModern(approvalSecret) {
   if (approvalResult?.structuredContent?.state !== 'consumed' ||
       approvalResult?.structuredContent?.operation_id !== operationId ||
       approvalResult?.structuredContent?.intent_sha256 !== intentSha256 ||
-      !String(approvalResult?.structuredContent?.output || '').includes('WCM_APPROVAL_TEST_OK')) {
+      !String(approvalResult?.structuredContent?.output || '').trim()) {
     throw new Error('approval test did not execute and consume the frozen command.');
   }
 

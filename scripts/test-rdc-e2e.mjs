@@ -267,7 +267,6 @@ async function runRound(round, approvalSecret) {
         name: 'approval_test_exec',
         arguments: {
           deviceId: targetDeviceId,
-          command: 'echo WCM_APPROVAL_TEST_OK',
           justification: 'RDC legacy E2E approval test.',
         },
       },
@@ -327,7 +326,7 @@ async function runRound(round, approvalSecret) {
   requireStatus(approvalExecution, 200);
   const approvalExecutionResult = parseSse(approvalExecution.text).result;
   if (approvalExecutionResult?.structuredContent?.state !== 'consumed' ||
-      !String(approvalExecutionResult?.structuredContent?.output || '').includes('WCM_APPROVAL_TEST_OK')) {
+      !String(approvalExecutionResult?.structuredContent?.output || '').trim()) {
     throw new Error('Approval test did not execute the frozen command.');
   }
 

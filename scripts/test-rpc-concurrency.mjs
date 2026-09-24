@@ -24,11 +24,9 @@ async function call(name, args) {
   }
 }
 
-async function prepare(command) {
+async function prepare() {
   const frozen = await call('approval_test_exec', {
     deviceId,
-    command,
-    timeout_ms: 5000,
   });
   const approvalId = frozen?.structuredContent?.approval_id;
   if (!approvalId) throw new Error('approval_test_exec did not return approval_id.');
@@ -38,12 +36,8 @@ async function prepare(command) {
   return { approvalId, approvalNonce };
 }
 
-const slow = await prepare(
-  `node -e "setTimeout(() => console.log('CONCURRENCY_SLOW_OK'), 500)"`,
-);
-const fast = await prepare(
-  `node -e "console.log('CONCURRENCY_FAST_OK')"`,
-);
+const slow = await prepare();
+const fast = await prepare();
 
 const [slowResult, fastResult] = await Promise.all([
   call('resolve_approval_test', {
@@ -58,13 +52,13 @@ const [slowResult, fastResult] = await Promise.all([
   }),
 ]);
 
-const slowText = String(slowResult?.structuredContent?.output || '');
-const fastText = String(fastResult?.structuredContent?.output || '');
-if (!slowText.includes('CONCURRENCY_SLOW_OK')) {
-  throw new Error('Slow approval test response was mismatched or incomplete.');
+if (slowResult?.structuredContent?.approval_id !== slow.approvalId ||
+    !String(slowResult?.structuredContent?.output || '').trim()) {
+  throw new Error('First approval test response was mismatched or incomplete.');
 }
-if (!fastText.includes('CONCURRENCY_FAST_OK')) {
-  throw new Error('Fast approval test response was mismatched or incomplete.');
+if (fastResult?.structuredContent?.approval_id !== fast.approvalId ||
+    !String(fastResult?.structuredContent?.output || '').trim()) {
+  throw new Error('Second approval test response was mismatched or incomplete.');
 }
 
 console.log(`RPC concurrency regression passed for ${deviceId}: duplicate external id=0 remained correctly correlated.`);
