@@ -29,4 +29,13 @@ assert.doesNotMatch(source, /new App\(/);
 assert.doesNotMatch(source, /app\.connect\(/);
 assert.doesNotMatch(source, /app\.callServerTool/);
 
+assert.doesNotMatch(html, /<script[^>]*type=["']module["']/i);
+assert.doesNotMatch(html, /<script[^>]*crossorigin/i);
+const bodyIndex = html.indexOf('<body');
+const cardIndex = html.indexOf('id="card"');
+const scriptIndex = html.indexOf('<script>');
+assert.ok(bodyIndex >= 0 && cardIndex > bodyIndex, 'approval card DOM is missing from body');
+assert.ok(scriptIndex > cardIndex, 'classic approval script must execute after the card DOM exists');
+assert.equal((html.match(/<script>/g) || []).length, 1, 'bundle must contain exactly one classic script');
+
 console.log('WCM MCP App bridge bundle checks: PASS');

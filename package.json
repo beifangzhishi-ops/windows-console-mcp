@@ -10,7 +10,7 @@
   },
   "scripts": {
     "postinstall": "node scripts/apply-desktop-commander-image-guard.mjs",
-    "build:ui": "vite build --configLoader native",
+    "build:ui": "vite build --configLoader native && node scripts/normalize-approval-ui-html.mjs",
     "typecheck:ui": "tsc -p ui/approval-test/tsconfig.json --noEmit",
     "check:ui": "npm run typecheck:ui && npm run build:ui && node scripts/test-ui-bundle.mjs",
     "test": "npm run check:ui && node scripts/test-approval-test.mjs && node scripts/test-router-routing-contract.mjs && node scripts/test-self-contained.mjs",
