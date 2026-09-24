@@ -106,9 +106,28 @@ async function getAccessToken(approvalSecret) {
   requireStatus(token, 200);
   if (token.json?.resource !== sdkResource) throw new Error('token resource mismatch.');
   if (!token.json?.access_token || !token.json?.refresh_token) throw new Error('token response was incomplete.');
+
+  stage = 'refresh token rotation';
+  const refresh = await request('/rdc/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'refresh_token',
+      client_id: clientId,
+      refresh_token: token.json.refresh_token,
+      resource: sdkResource,
+    }).toString(),
+  });
+  requireStatus(refresh, 200);
+  if (!refresh.json?.access_token || !refresh.json?.refresh_token) {
+    throw new Error('refresh token rotation did not return a complete token pair.');
+  }
+  if (refresh.json.refresh_token === token.json.refresh_token) {
+    throw new Error('refresh token rotation reused the previous refresh token.');
+  }
   return {
-    accessToken: token.json.access_token,
-    refreshToken: token.json.refresh_token,
+    accessToken: refresh.json.access_token,
+    refreshToken: refresh.json.refresh_token,
   };
 }
 
@@ -147,6 +166,9 @@ async function verifySurface(client, { exerciseApproval = false } = {}) {
   const deviceInfo = JSON.parse(devices.content?.[0]?.text || '{}');
   const deviceId = deviceInfo.defaultDeviceId || deviceInfo.devices?.find((item) => item.online)?.deviceId;
   if (!deviceId) throw new Error('list_devices did not return a target device.');
+
+  const ordinary = await client.callTool({ name: 'get_config', arguments: { deviceId } });
+  if (ordinary.isError) throw new Error('ordinary get_config routing failed.');
 
   const sessionMeta = { 'openai/session': 'wcm-sdk-e2e-session' };
   const frozen = await client.callTool({
@@ -206,8 +228,10 @@ async function main() {
   console.log('RDC SDK MCP E2E: PASS');
   console.log('router_sdk_streamable_http=PASS');
   console.log('sidecar_oauth_resource=PASS');
+  console.log('refresh_token_rotation=PASS');
   console.log('sidecar_sdk_alias_discovery=PASS');
   console.log('sidecar_sdk_session=PASS');
+  console.log('ordinary_direct_routing=PASS');
   console.log('approval_deny_roundtrip=PASS');
 }
 

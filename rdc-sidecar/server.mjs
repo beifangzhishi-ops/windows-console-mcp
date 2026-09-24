@@ -45,7 +45,6 @@ const REVOKE_PATH = '/rdc/revoke';
 const CONSENT_PATH = '/rdc/oauth/consent';
 const MCP_PATH = '/rdc/mcp';
 const SDK_ALIAS_MCP_PATH = '/rdc/mcp-ccm';
-const LEGACY_MCP_PATH = '/rdc/mcp-legacy';
 const REGISTRATION_WINDOW_MS = 10 * 60 * 1000;
 const REGISTRATION_MAX_ATTEMPTS = 20;
 const AUTHORIZATION_DISCOVERY_PATHS = new Set([
@@ -59,10 +58,6 @@ const RESOURCE_DISCOVERY_PATHS = new Set([
 const SDK_ALIAS_RESOURCE_DISCOVERY_PATHS = new Set([
   '/.well-known/oauth-protected-resource/rdc/mcp-ccm',
   '/rdc/mcp-ccm/.well-known/oauth-protected-resource',
-]);
-const LEGACY_RESOURCE_DISCOVERY_PATHS = new Set([
-  '/.well-known/oauth-protected-resource/rdc/mcp-legacy',
-  '/rdc/mcp-legacy/.well-known/oauth-protected-resource',
 ]);
 
 function logMessage(logger, method, message) {
@@ -254,10 +249,6 @@ function sdkAliasResource(config) {
   return resourceAtPath(config, SDK_ALIAS_MCP_PATH);
 }
 
-function legacyResource(config) {
-  return resourceAtPath(config, LEGACY_MCP_PATH);
-}
-
 function protectedResourceMetadataUrl(resource) {
   const url = new URL(resource);
   return `${url.origin}/.well-known/oauth-protected-resource${url.pathname}`;
@@ -265,8 +256,7 @@ function protectedResourceMetadataUrl(resource) {
 
 function isSupportedResource(config, resource) {
   return resource === config.resource ||
-    resource === sdkAliasResource(config) ||
-    resource === legacyResource(config);
+    resource === sdkAliasResource(config);
 }
 
 function sendUnauthorized(response, config, resource = config.resource) {
@@ -579,9 +569,7 @@ function getUpstreamRequestPath(runtime, url) {
   const basePath = upstreamUrl.pathname.replace(/\/+$/u, '');
   const mcpPath = url.pathname === SDK_ALIAS_MCP_PATH
     ? '/mcp-ccm'
-    : url.pathname === LEGACY_MCP_PATH
-      ? '/mcp-legacy'
-      : '/mcp';
+    : '/mcp';
   return basePath + mcpPath + url.search;
 }
 
@@ -676,235 +664,6 @@ function sendUpstreamResponse(response, upstreamResponse) {
   response.end(upstreamResponse.body);
 }
 
-function parseUpstreamMessage(body) {
-  const text = body.toString('utf8');
-  const dataLine = text
-    .split(/\r?\n/u)
-    .find((line) => line.startsWith('data:'));
-  const jsonText = dataLine ? dataLine.slice('data:'.length).trim() : text.trim();
-  if (!jsonText) {
-    return null;
-  }
-  try {
-    return JSON.parse(jsonText);
-  } catch {
-    return null;
-  }
-}
-
-function sendCachedInitialize(response, requestPayload, session) {
-  const message = {
-    ...session.initializeMessage,
-    id: requestPayload.id,
-  };
-  response.statusCode = 200;
-  response.setHeader('Content-Type', 'text/event-stream');
-  response.setHeader('Cache-Control', 'no-cache');
-  response.setHeader('Mcp-Session-Id', session.sessionId);
-  response.setHeader('X-Content-Type-Options', 'nosniff');
-  response.end('event: message\ndata: ' + JSON.stringify(message) + '\n\n');
-}
-
-const UPSTREAM_SESSION_STATE_VERSION = 1;
-
-function loadUpstreamSession(file, upstreamUrl) {
-  if (!file || !fs.existsSync(file)) {
-    return null;
-  }
-  try {
-    const state = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if (
-      !state ||
-      state.version !== UPSTREAM_SESSION_STATE_VERSION ||
-      state.upstreamUrl !== upstreamUrl ||
-      typeof state.sessionId !== 'string' ||
-      !state.sessionId ||
-      !state.initializeMessage ||
-      typeof state.initializeMessage !== 'object' ||
-      !state.initializeMessage.result
-    ) {
-      return null;
-    }
-    return {
-      sessionId: state.sessionId,
-      initializeMessage: state.initializeMessage,
-    };
-  } catch {
-    return null;
-  }
-}
-
-function saveUpstreamSession(file, upstreamUrl, sessionId, initializeMessage) {
-  if (!file) {
-    return;
-  }
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const temporaryFile = file + '.' + process.pid + '.tmp';
-  fs.writeFileSync(
-    temporaryFile,
-    JSON.stringify({
-      version: UPSTREAM_SESSION_STATE_VERSION,
-      upstreamUrl,
-      sessionId,
-      initializeMessage,
-    }),
-    { encoding: 'utf8', mode: 0o600 },
-  );
-  fs.renameSync(temporaryFile, file);
-}
-
-function removeUpstreamSession(file) {
-  if (!file) {
-    return;
-  }
-  try {
-    fs.unlinkSync(file);
-  } catch (error) {
-    if (error && error.code !== 'ENOENT') {
-      throw error;
-    }
-  }
-}
-
-function isInvalidUpstreamSession(response) {
-  if (response.statusCode === 404) {
-    return true;
-  }
-  if (response.statusCode !== 400) {
-    return false;
-  }
-  const text = response.body.toString('utf8').toLowerCase();
-  return (
-    text.includes('session') &&
-    (text.includes('invalid') || text.includes('not found') || text.includes('no transport'))
-  );
-}
-
-class UpstreamHttpError extends Error {
-  constructor(message, response) {
-    super(message);
-    this.name = 'UpstreamHttpError';
-    this.response = response;
-  }
-}
-
-class UpstreamSessionManager {
-  constructor(runtime) {
-    this.runtime = runtime;
-    const persisted = loadUpstreamSession(
-      runtime.config.upstreamSessionFile,
-      runtime.upstreamUrl,
-    );
-    this.sessionId = persisted?.sessionId || null;
-    this.initializeMessage = persisted?.initializeMessage || null;
-    this.initializeRequest = null;
-    this.initializing = null;
-  }
-
-  async initializeFromRequest(requestHeaders, payload) {
-    if (!this.initializeRequest) {
-      this.initializeRequest = {
-        headers: buildUpstreamHeaders(requestHeaders, null),
-        payload,
-      };
-    }
-    return this.ensureSession();
-  }
-
-  async ensureSession() {
-    if (this.sessionId && this.initializeMessage) {
-      return {
-        sessionId: this.sessionId,
-        initializeMessage: this.initializeMessage,
-      };
-    }
-    if (this.initializing) {
-      return this.initializing;
-    }
-    if (!this.initializeRequest) {
-      throw new Error('MCP initialize is required before other requests.');
-    }
-    const initialization = this.createSession();
-    this.initializing = initialization;
-    try {
-      return await initialization;
-    } finally {
-      if (this.initializing === initialization) {
-        this.initializing = null;
-      }
-    }
-  }
-
-  async createSession() {
-    const body = JSON.stringify(this.initializeRequest.payload);
-    const response = await requestUpstreamBuffer(
-      this.runtime,
-      'POST',
-      new URL(LEGACY_MCP_PATH, 'http://127.0.0.1'),
-      buildUpstreamHeaders(this.initializeRequest.headers, body),
-      body,
-    );
-    if (response.statusCode !== 200) {
-      throw new UpstreamHttpError('Upstream initialize failed.', response);
-    }
-    const message = parseUpstreamMessage(response.body);
-    const sessionId = response.headers[MCP_SESSION_HEADER];
-    if (!message || !message.result || typeof sessionId !== 'string' || !sessionId) {
-      throw new Error('Upstream initialize response was incomplete.');
-    }
-    this.sessionId = sessionId;
-    this.initializeMessage = message;
-    saveUpstreamSession(
-      this.runtime.config.upstreamSessionFile,
-      this.runtime.upstreamUrl,
-      sessionId,
-      message,
-    );
-    return { sessionId, initializeMessage: message };
-  }
-
-  invalidate(sessionId) {
-    if (sessionId && this.sessionId !== sessionId) {
-      return;
-    }
-    this.sessionId = null;
-    this.initializeMessage = null;
-    removeUpstreamSession(this.runtime.config.upstreamSessionFile);
-  }
-
-  async request(requestHeaders, url, body) {
-    const session = await this.ensureSession();
-    let response = await requestUpstreamBuffer(
-      this.runtime,
-      'POST',
-      url,
-      buildUpstreamHeaders(requestHeaders, body, session.sessionId),
-      body,
-    );
-    if (isInvalidUpstreamSession(response)) {
-      this.invalidate(session.sessionId);
-      const refreshedSession = await this.ensureSession();
-      response = await requestUpstreamBuffer(
-        this.runtime,
-        'POST',
-        url,
-        buildUpstreamHeaders(requestHeaders, body, refreshedSession.sessionId),
-        body,
-      );
-    }
-    return response;
-  }
-
-
-  async close() {
-    if (this.initializing) {
-      try {
-        await this.initializing;
-      } catch {}
-    }
-  }
-}
-
 function proxyMcpStream(request, response, runtime, url, sessionId) {
   const upstreamUrl = new URL(runtime.upstreamUrl);
   const headers = buildUpstreamHeaders(request.headers, null, sessionId);
@@ -918,9 +677,6 @@ function proxyMcpStream(request, response, runtime, url, sessionId) {
       timeout: UPSTREAM_TIMEOUT_MS,
     },
     (upstreamResponse) => {
-      if (upstreamResponse.statusCode === 404) {
-        runtime.upstreamSession.invalidate(sessionId);
-      }
       response.statusCode = upstreamResponse.statusCode || 502;
       for (const [name, value] of Object.entries(upstreamResponse.headers)) {
         if (!RESPONSE_HOP_HEADERS.has(name) && value !== undefined) {
@@ -955,80 +711,6 @@ function proxyMcpStream(request, response, runtime, url, sessionId) {
     }
   });
   upstreamRequest.end();
-}
-
-async function handleProtectedLegacyMcp(request, response, runtime, url) {
-  const resource = legacyResource(runtime.config);
-  const accessToken = parseBearerToken(request);
-  if (!accessToken || !runtime.store.validateAccessToken(accessToken, resource)) {
-    sendUnauthorized(response, runtime.config, resource);
-    return;
-  }
-  if (!['GET', 'POST', 'DELETE'].includes(request.method)) {
-    response.setHeader('Allow', 'GET, POST, DELETE');
-    sendJson(response, 405, { error: 'method_not_allowed' }, { noStore: true });
-    return;
-  }
-  let mcpTraceId = null;
-  try {
-    if (request.method === 'DELETE') {
-      response.statusCode = 204;
-      setNoStore(response);
-      response.end();
-      return;
-    }
-    if (request.method === 'GET') {
-      if (String(request.headers['mcp-protocol-version'] || '') === '2026-07-28') {
-        const direct = await requestUpstreamBuffer(runtime, 'GET', url, buildUpstreamHeaders(request.headers, null), null);
-        sendUpstreamResponse(response, direct);
-        return;
-      }
-      const session = await runtime.upstreamSession.ensureSession();
-      proxyMcpStream(request, response, runtime, url, session.sessionId);
-      return;
-    }
-    const body = await readBody(request);
-    let payload = null;
-    try {
-      payload = JSON.parse(body);
-    } catch {}
-    mcpTraceId = beginMcpTrace(response, runtime, payload, request);
-    const modernRequest = String(request.headers['mcp-protocol-version'] || '') === '2026-07-28' || payload?.method === 'server/discover';
-    if (modernRequest) {
-      const direct = await requestUpstreamBuffer(runtime, 'POST', url, buildUpstreamHeaders(request.headers, body), body);
-      sendUpstreamResponse(response, direct);
-      return;
-    }
-    if (payload && payload.method === 'initialize') {
-      const initialized = await runtime.upstreamSession.initializeFromRequest(
-        request.headers,
-        payload,
-      );
-      sendCachedInitialize(response, payload, initialized);
-      return;
-    }
-    const upstreamResponse = await runtime.upstreamSession.request(
-      request.headers,
-      url,
-      body,
-    );
-    sendUpstreamResponse(response, upstreamResponse);
-  } catch (error) {
-    if (error instanceof UpstreamHttpError) {
-      sendUpstreamResponse(response, error.response);
-      return;
-    }
-    if (error instanceof OAuthError) {
-      sendOAuthError(response, error);
-      return;
-    }
-    if (error instanceof Error && error.message.includes('MCP initialize is required')) {
-      sendJson(response, 409, { error: 'mcp_initialize_required' }, { noStore: true });
-      return;
-    }
-    appendHttpTrace(runtime, 'UPSTREAM ERROR trace=' + (mcpTraceId || '-') + ' message=' + String(error?.message || error || 'unknown'));
-    sendJson(response, 502, { error: 'upstream_unavailable' }, { noStore: true });
-  }
 }
 
 async function handleProtectedSdkMcp(request, response, runtime, url, resource) {
@@ -1100,12 +782,10 @@ async function handleRequest(request, response, runtime) {
     });
     return;
   }
-  if ((RESOURCE_DISCOVERY_PATHS.has(url.pathname) || SDK_ALIAS_RESOURCE_DISCOVERY_PATHS.has(url.pathname) || LEGACY_RESOURCE_DISCOVERY_PATHS.has(url.pathname)) && request.method === 'GET') {
+  if ((RESOURCE_DISCOVERY_PATHS.has(url.pathname) || SDK_ALIAS_RESOURCE_DISCOVERY_PATHS.has(url.pathname)) && request.method === 'GET') {
     const resource = SDK_ALIAS_RESOURCE_DISCOVERY_PATHS.has(url.pathname)
       ? sdkAliasResource(runtime.config)
-      : LEGACY_RESOURCE_DISCOVERY_PATHS.has(url.pathname)
-        ? legacyResource(runtime.config)
-        : runtime.config.resource;
+      : runtime.config.resource;
     sendJson(response, 200, buildProtectedResourceMetadata(runtime.config, resource), {
       noStore: true,
       cors: true,
@@ -1140,10 +820,6 @@ async function handleRequest(request, response, runtime) {
     await handleProtectedSdkMcp(request, response, runtime, url, sdkAliasResource(runtime.config));
     return;
   }
-  if (url.pathname === LEGACY_MCP_PATH) {
-    await handleProtectedLegacyMcp(request, response, runtime, url);
-    return;
-  }
   sendJson(response, 404, { error: 'not_found' });
 }
 
@@ -1170,11 +846,9 @@ export function createRdcServer(options = {}) {
     logger,
     upstreamUrl,
     approvalSecret,
-    upstreamSession: null,
     registrationAttempts: new Map(),
     server: null,
   };
-  runtime.upstreamSession = new UpstreamSessionManager(runtime);
   const server = http.createServer((request, response) => {
     const requestPath = new URL(request.url || '/', 'http://127.0.0.1').pathname;
     response.on('finish', () => appendHttpTrace(runtime, 'HTTP ' + request.method + ' ' + requestPath + ' status=' + response.statusCode));
@@ -1212,7 +886,6 @@ export function listenRdcServer(runtime, port = runtime.config.port, host = runt
 }
 
 export async function closeRdcServer(runtime) {
-  await runtime.upstreamSession.close();
   if (!runtime.server.listening) {
     return;
   }

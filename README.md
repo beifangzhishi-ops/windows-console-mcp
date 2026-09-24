@@ -23,7 +23,7 @@ Controller
        `- remote workers  deviceId=remote-worker, ...
 ```
 
-The public `/rdc/mcp` endpoint uses the MCP SDK `StreamableHTTPServerTransport`, matching CCM's standard initialize/session lifecycle. The previous custom stateful/`2026-07-28` transports remain available only on the controller's local `/rdc/mcp-legacy` test path and are not exposed through the Funnel.
+The public `/rdc/mcp` endpoint uses the MCP SDK `StreamableHTTPServerTransport`, matching CCM's standard initialize/session lifecycle.
 
 ## Controller setup
 
@@ -63,9 +63,9 @@ The current approval work is isolated behind one test-only execution path:
 3. The card calls the app-only `resolve_pending_action` tool. Approve dispatches only the frozen command to the target worker through `start_process`; Deny does not dispatch it.
 4. The App writes the terminal result into model context and asks ChatGPT to continue without reconstructing the command.
 
-The ChatGPT-facing approval surface follows the currently working CCM wire contract: approval tools and the approval resource are ordinary MCP tools/resources without a separate UI capability negotiation layer. `request_approval` carries `ui.resourceUri`, `ui/resourceUri`, `openai/outputTemplate`, and `openai/widgetAccessible`; `resolve_pending_action` is app-only and widget-accessible. Android approval rendering and both Deny and Approve flows have been verified on the SDK transport. The legacy transport remains ordinary-WCM-only and does not expose the approval-test tools or approval resource.
+The ChatGPT-facing approval surface follows the currently working CCM wire contract: approval tools and the approval resource are ordinary MCP tools/resources without a separate UI capability negotiation layer. `request_approval` carries `ui.resourceUri`, `ui/resourceUri`, `openai/outputTemplate`, and `openai/widgetAccessible`; `resolve_pending_action` is app-only and widget-accessible. Android approval rendering and both Deny and Approve flows have been verified on the SDK transport.
 
-`/rdc/mcp-ccm` is retained temporarily as an SDK-transport alias for the already-deployed `mcpccm` ChatGPT registration. New or rebuilt WCM registrations should use the canonical `/rdc/mcp` endpoint. `/rdc/mcp-legacy` is local-only and exists solely for regression tests.
+`/rdc/mcp-ccm` is retained temporarily as an SDK-transport alias for the already-deployed `mcpccm` ChatGPT registration. New or rebuilt WCM registrations should use the canonical `/rdc/mcp` endpoint.
 
 The approval View is one static `String.raw` HTML document intentionally kept structurally aligned with CCM's current working approval View. It uses the same classic inline-script layout, `ui/initialize` / `ui/notifications/initialized` lifecycle, tool-result notifications, `tools/call`, `ui/update-model-context`, and ChatGPT `window.openai` globals (`toolResponseMetadata`, `toolOutput`, `openai:set_globals`, intrinsic-height notification, and follow-up continuation). The resource path is fixed at `ui://wcm/approval-v1.html`, matching CCM's fixed-URI pattern while keeping the WCM namespace distinct.
 
@@ -86,11 +86,10 @@ To exercise an already configured live controller and sidecar, run:
 
 ```powershell
 npm run test:live
-npm run test:modern
-npm run test:legacy-modern
+npm run test:sdk
 ```
 
-The live suite covers the canonical SDK Streamable HTTP endpoint, the rollback stateful transport, the rollback custom `2026-07-28` transport, the CCM-aligned ChatGPT approval surface, the isolated approval-test execution path, direct ordinary-tool routing, device routing, resources, and duplicate external JSON-RPC IDs. It uses the configured OAuth deployment and can register test clients and exercise the frozen approval-test flow on the target worker, so it is intentionally separate from the default CI test.
+The live suite covers the canonical SDK Streamable HTTP endpoint, OAuth registration/PKCE/token refresh, the CCM-aligned ChatGPT approval surface, the isolated approval-test execution path, ordinary direct tool routing, device routing, resources, and session handling. It uses the configured OAuth deployment and can register test clients and exercise the frozen approval-test flow on the target worker, so it is intentionally separate from the default CI test.
 
 The public endpoint is configured by `RDC_RESOURCE`. With a Tailscale Funnel hostname it typically looks like:
 

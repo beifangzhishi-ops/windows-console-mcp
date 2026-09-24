@@ -101,7 +101,6 @@ export function createConfig(options = {}) {
     issuer,
     resource,
     stateFile,
-    upstreamSessionFile,
     approvalSecretFile,
     logDir,
     tokenTtlSeconds,
@@ -160,12 +159,6 @@ export function createConfig(options = {}) {
     rootDir,
     stateFile ?? values.RDC_STATE_FILE ?? '.state/rdc-oauth-state.json',
   );
-  const selectedUpstreamSessionFile = resolveFromRoot(
-    rootDir,
-    upstreamSessionFile ??
-      values.RDC_UPSTREAM_SESSION_FILE ??
-      '.state/rdc-upstream-session.json',
-  );
   const selectedApprovalSecretFile = resolveFromRoot(
     rootDir,
     approvalSecretFile ??
@@ -184,7 +177,6 @@ export function createConfig(options = {}) {
     protectedResourceMetadataUrl: wellKnownUrl(selectedResource, 'oauth-protected-resource'),
     authorizationServerMetadataUrl: wellKnownUrl(selectedIssuer, 'oauth-authorization-server'),
     stateFile: selectedStateFile,
-    upstreamSessionFile: selectedUpstreamSessionFile,
     approvalSecretFile: selectedApprovalSecretFile,
     logDir: selectedLogDir,
     tokenTtlSeconds: selectedTtl,
