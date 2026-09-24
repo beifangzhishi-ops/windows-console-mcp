@@ -5,6 +5,7 @@ import { createPkceChallenge } from '../rdc-sidecar/oauth.mjs';
 
 const config = loadConfig(process.cwd());
 const baseUrl = process.env.RDC_E2E_BASE_URL || `http://${config.host}:${config.port}`;
+const legacyResource = new URL('/rdc/mcp-legacy', config.resource).toString();
 const redirectUri = 'http://127.0.0.1:19002/rdc-modern-e2e-callback';
 const protocol = '2026-07-28';
 let stage = 'startup';
@@ -52,7 +53,7 @@ async function getAccessToken(approvalSecret) {
     response_type: 'code',
     code_challenge: challenge,
     code_challenge_method: 'S256',
-    resource: config.resource,
+    resource: legacyResource,
     scope: 'mcp',
     state: 'modern-e2e',
   });
@@ -82,7 +83,7 @@ async function getAccessToken(approvalSecret) {
       code,
       redirect_uri: redirectUri,
       code_verifier: verifier,
-      resource: config.resource,
+      resource: legacyResource,
     }).toString(),
   });
   requireStatus(token, 200);
@@ -101,7 +102,7 @@ function modernHeaders(accessToken) {
   };
 }async function mcp(accessToken, id, method, params = {}) {
   stage = method;
-  const result = await request('/rdc/mcp', {
+  const result = await request('/rdc/mcp-legacy', {
     method: 'POST',
     headers: modernHeaders(accessToken),
     body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
@@ -341,7 +342,7 @@ async function main() {
   const approvalSecret = fs.readFileSync(config.approvalSecretFile, 'utf8').trim();
   if (approvalSecret.length < 16) throw new Error('Approval secret is not configured.');
   const result = await runModern(approvalSecret);
-  console.log('RDC Modern MCP E2E: PASS');
+  console.log('RDC Legacy Modern MCP E2E: PASS');
   console.log('protocol=2026-07-28');
   console.log('server_discover=PASS');
   console.log('tools_count=' + result.toolCount);
@@ -354,6 +355,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error('RDC Modern MCP E2E: FAIL at ' + stage + '. ' + String(error?.message || error));
+  console.error('RDC Legacy Modern MCP E2E: FAIL at ' + stage + '. ' + String(error?.message || error));
   process.exitCode = 1;
 });

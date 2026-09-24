@@ -28,7 +28,7 @@ for (const marker of [
   'sendFollowUpMessage',
   'hidden.approval_nonce',
 ]) {
-  assert.ok(html.includes(marker), `approval HTML is missing CCM parity marker: ${marker}`);
+  assert.ok(html.includes(marker), `approval HTML is missing CCM-aligned marker: ${marker}`);
 }
 
 assert.doesNotMatch(html, /@modelcontextprotocol\/ext-apps/);
@@ -44,4 +44,4 @@ assert.ok(bodyIndex >= 0 && cardIndex > bodyIndex);
 assert.ok(scriptIndex > cardIndex, 'approval bridge must execute after the card DOM');
 assert.equal((html.match(/<script>/g) || []).length, 1);
 
-console.log('WCM CCM-parity approval View checks: PASS');
+console.log('WCM CCM-aligned approval View checks: PASS');

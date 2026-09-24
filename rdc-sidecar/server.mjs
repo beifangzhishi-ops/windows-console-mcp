@@ -44,7 +44,8 @@ const REGISTER_PATH = '/rdc/register';
 const REVOKE_PATH = '/rdc/revoke';
 const CONSENT_PATH = '/rdc/oauth/consent';
 const MCP_PATH = '/rdc/mcp';
-const CCM_PARITY_MCP_PATH = '/rdc/mcp-ccm';
+const SDK_ALIAS_MCP_PATH = '/rdc/mcp-ccm';
+const LEGACY_MCP_PATH = '/rdc/mcp-legacy';
 const REGISTRATION_WINDOW_MS = 10 * 60 * 1000;
 const REGISTRATION_MAX_ATTEMPTS = 20;
 const AUTHORIZATION_DISCOVERY_PATHS = new Set([
@@ -55,9 +56,13 @@ const RESOURCE_DISCOVERY_PATHS = new Set([
   '/.well-known/oauth-protected-resource/rdc/mcp',
   '/rdc/mcp/.well-known/oauth-protected-resource',
 ]);
-const CCM_PARITY_RESOURCE_DISCOVERY_PATHS = new Set([
+const SDK_ALIAS_RESOURCE_DISCOVERY_PATHS = new Set([
   '/.well-known/oauth-protected-resource/rdc/mcp-ccm',
   '/rdc/mcp-ccm/.well-known/oauth-protected-resource',
+]);
+const LEGACY_RESOURCE_DISCOVERY_PATHS = new Set([
+  '/.well-known/oauth-protected-resource/rdc/mcp-legacy',
+  '/rdc/mcp-legacy/.well-known/oauth-protected-resource',
 ]);
 
 function logMessage(logger, method, message) {
@@ -73,7 +78,7 @@ function setNoStore(response) {
 
 function setCors(response) {
   response.setHeader('Access-Control-Allow-Origin', '*');
-  response.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  response.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
   response.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, Mcp-Session-Id, Mcp-Protocol-Version, Last-Event-ID');
 }
 
@@ -240,9 +245,17 @@ function parseBearerToken(request) {
   return match ? match[1] : null;
 }
 
-function ccmParityResource(config) {
+function resourceAtPath(config, pathname) {
   const resource = new URL(config.resource);
-  return resource.origin + CCM_PARITY_MCP_PATH;
+  return resource.origin + pathname;
+}
+
+function sdkAliasResource(config) {
+  return resourceAtPath(config, SDK_ALIAS_MCP_PATH);
+}
+
+function legacyResource(config) {
+  return resourceAtPath(config, LEGACY_MCP_PATH);
 }
 
 function protectedResourceMetadataUrl(resource) {
@@ -251,7 +264,9 @@ function protectedResourceMetadataUrl(resource) {
 }
 
 function isSupportedResource(config, resource) {
-  return resource === config.resource || resource === ccmParityResource(config);
+  return resource === config.resource ||
+    resource === sdkAliasResource(config) ||
+    resource === legacyResource(config);
 }
 
 function sendUnauthorized(response, config, resource = config.resource) {
@@ -562,7 +577,11 @@ async function handleRevocation(request, response, runtime) {
 function getUpstreamRequestPath(runtime, url) {
   const upstreamUrl = new URL(runtime.upstreamUrl);
   const basePath = upstreamUrl.pathname.replace(/\/+$/u, '');
-  const mcpPath = url.pathname === CCM_PARITY_MCP_PATH ? '/mcp-ccm' : '/mcp';
+  const mcpPath = url.pathname === SDK_ALIAS_MCP_PATH
+    ? '/mcp-ccm'
+    : url.pathname === LEGACY_MCP_PATH
+      ? '/mcp-legacy'
+      : '/mcp';
   return basePath + mcpPath + url.search;
 }
 
@@ -821,7 +840,7 @@ class UpstreamSessionManager {
     const response = await requestUpstreamBuffer(
       this.runtime,
       'POST',
-      new URL(MCP_PATH, 'http://127.0.0.1'),
+      new URL(LEGACY_MCP_PATH, 'http://127.0.0.1'),
       buildUpstreamHeaders(this.initializeRequest.headers, body),
       body,
     );
@@ -938,10 +957,11 @@ function proxyMcpStream(request, response, runtime, url, sessionId) {
   upstreamRequest.end();
 }
 
-async function handleProtectedMcp(request, response, runtime, url) {
+async function handleProtectedLegacyMcp(request, response, runtime, url) {
+  const resource = legacyResource(runtime.config);
   const accessToken = parseBearerToken(request);
-  if (!accessToken || !runtime.store.validateAccessToken(accessToken, runtime.config.resource)) {
-    sendUnauthorized(response, runtime.config);
+  if (!accessToken || !runtime.store.validateAccessToken(accessToken, resource)) {
+    sendUnauthorized(response, runtime.config, resource);
     return;
   }
   if (!['GET', 'POST', 'DELETE'].includes(request.method)) {
@@ -1011,8 +1031,7 @@ async function handleProtectedMcp(request, response, runtime, url) {
   }
 }
 
-async function handleProtectedCcmParityMcp(request, response, runtime, url) {
-  const resource = ccmParityResource(runtime.config);
+async function handleProtectedSdkMcp(request, response, runtime, url, resource) {
   const accessToken = parseBearerToken(request);
   if (!accessToken || !runtime.store.validateAccessToken(accessToken, resource)) {
     sendUnauthorized(response, runtime.config, resource);
@@ -1047,7 +1066,7 @@ async function handleProtectedCcmParityMcp(request, response, runtime, url) {
     );
     sendUpstreamResponse(response, upstreamResponse);
   } catch (error) {
-    appendHttpTrace(runtime, 'UPSTREAM CCM-PARITY ERROR trace=' + (mcpTraceId || '-') + ' message=' + String(error?.message || error || 'unknown'));
+    appendHttpTrace(runtime, 'UPSTREAM SDK ERROR trace=' + (mcpTraceId || '-') + ' message=' + String(error?.message || error || 'unknown'));
     sendJson(response, 502, { error: 'upstream_unavailable' }, { noStore: true });
   }
 }
@@ -1081,10 +1100,12 @@ async function handleRequest(request, response, runtime) {
     });
     return;
   }
-  if ((RESOURCE_DISCOVERY_PATHS.has(url.pathname) || CCM_PARITY_RESOURCE_DISCOVERY_PATHS.has(url.pathname)) && request.method === 'GET') {
-    const resource = CCM_PARITY_RESOURCE_DISCOVERY_PATHS.has(url.pathname)
-      ? ccmParityResource(runtime.config)
-      : runtime.config.resource;
+  if ((RESOURCE_DISCOVERY_PATHS.has(url.pathname) || SDK_ALIAS_RESOURCE_DISCOVERY_PATHS.has(url.pathname) || LEGACY_RESOURCE_DISCOVERY_PATHS.has(url.pathname)) && request.method === 'GET') {
+    const resource = SDK_ALIAS_RESOURCE_DISCOVERY_PATHS.has(url.pathname)
+      ? sdkAliasResource(runtime.config)
+      : LEGACY_RESOURCE_DISCOVERY_PATHS.has(url.pathname)
+        ? legacyResource(runtime.config)
+        : runtime.config.resource;
     sendJson(response, 200, buildProtectedResourceMetadata(runtime.config, resource), {
       noStore: true,
       cors: true,
@@ -1112,11 +1133,15 @@ async function handleRequest(request, response, runtime) {
     return;
   }
   if (url.pathname === MCP_PATH) {
-    await handleProtectedMcp(request, response, runtime, url);
+    await handleProtectedSdkMcp(request, response, runtime, url, runtime.config.resource);
     return;
   }
-  if (url.pathname === CCM_PARITY_MCP_PATH) {
-    await handleProtectedCcmParityMcp(request, response, runtime, url);
+  if (url.pathname === SDK_ALIAS_MCP_PATH) {
+    await handleProtectedSdkMcp(request, response, runtime, url, sdkAliasResource(runtime.config));
+    return;
+  }
+  if (url.pathname === LEGACY_MCP_PATH) {
+    await handleProtectedLegacyMcp(request, response, runtime, url);
     return;
   }
   sendJson(response, 404, { error: 'not_found' });

@@ -41,9 +41,8 @@ const WORKER_PORT = Number(process.env.WC_WORKER_PORT || 18101);
 const WORKER_REMOTE_HOST = process.env.WC_WORKER_REMOTE_HOST || '';
 const WORKER_REMOTE_PORT = Number(process.env.WC_WORKER_REMOTE_PORT || 18100);
 const MCP_PATH = '/mcp';
-const CCM_PARITY_MCP_PATH = '/mcp-ccm';
-const MODERN_PROTOCOL = '2026-07-28';
-const LEGACY_PROTOCOL = '2025-06-18';
+const SDK_ALIAS_MCP_PATH = '/mcp-ccm';
+const WORKER_PROTOCOL_VERSION = '2025-06-18';
 const MAX_BODY_BYTES = 1024 * 1024;
 const MAX_TOOL_RESULT_BYTES = resolveMaxRouterToolResultBytes(process.env.WC_MAX_TOOL_RESULT_BYTES);
 const ROUTER_TRACE_FILE = path.resolve(process.cwd(), 'logs', 'router-trace.log');
@@ -74,9 +73,8 @@ const hub = new WorkerHub({
   remotePort: WORKER_REMOTE_PORT,
   logger: routerLogger,
 });
-const legacySessions = new Map();
-const ccmParityTransports = new Map();
-const ccmParityServers = new Map();
+const sdkTransports = new Map();
+const sdkServers = new Map();
 const workerInitialization = new Map();
 const toolListCache = new ConnectionScopedToolListCache();
 
@@ -99,29 +97,8 @@ function sendJson(response, status, body, headers = {}) {
   response.end(text);
 }
 
-function sendSse(response, status, message, sessionId = null) {
-  const text = 'event: message\ndata: ' + JSON.stringify(message) + '\n\n';
-  response.statusCode = status;
-  response.setHeader('Content-Type', 'text/event-stream');
-  response.setHeader('Cache-Control', 'no-cache');
-  response.setHeader('X-Content-Type-Options', 'nosniff');
-  if (sessionId) response.setHeader('Mcp-Session-Id', sessionId);
-  response.end(text);
-}
-
 function jsonRpcError(id, code, message) {
   return { jsonrpc: '2.0', id, error: { code, message } };
-}
-
-function modernResult(result) {
-  return {
-    resultType: 'complete',
-    ...result,
-    _meta: {
-      ...(result?._meta || {}),
-      'io.modelcontextprotocol/serverInfo': serverInfo,
-    },
-  };
 }
 
 async function readBody(request) {
@@ -142,7 +119,7 @@ function stripModernMeta(payload) {
   return copy;
 }
 
-function legacyInitializePayload(sourcePayload = null) {
+function workerInitializePayload(sourcePayload = null) {
   const clientInfo = sourcePayload?.params?.clientInfo ||
     sourcePayload?.params?._meta?.['io.modelcontextprotocol/clientInfo'] ||
     routerClientInfo;
@@ -151,7 +128,7 @@ function legacyInitializePayload(sourcePayload = null) {
     id: 'worker-init-' + randomUUID(),
     method: 'initialize',
     params: {
-      protocolVersion: LEGACY_PROTOCOL,
+      protocolVersion: WORKER_PROTOCOL_VERSION,
       capabilities: {},
       clientInfo,
     },
@@ -163,7 +140,7 @@ async function ensureWorkerInitialized(deviceId, sourcePayload = null) {
   if (!info) throw new Error('Worker is offline: ' + deviceId);
   const cached = workerInitialization.get(deviceId);
   if (cached?.connectionId === info.connectionId) return cached;
-  const initialize = legacyInitializePayload(sourcePayload);
+  const initialize = workerInitializePayload(sourcePayload);
   const message = await hub.call(deviceId, initialize);
   if (!message?.result) throw new Error('Worker initialize failed: ' + deviceId);
   hub.notify(deviceId, {
@@ -604,7 +581,7 @@ async function executeTool(payload, sourcePayload = null, { allowApproval = true
   }
 }
 
-function ccmParityInstructions() {
+function sdkInstructions() {
   return `Every Desktop Commander tool requires an explicit deviceId. Ordinary WCM tools route directly to the selected worker and are not blocked by the approval test flow. approval_test_exec is an isolated test-only approval path for one frozen hostname action. Default device: ${registry.defaultDeviceId}.\n\n${SPECIALIZED_CAPABILITIES}\n\n${WCM_ERROR_SEMANTICS}`;
 }
 
@@ -615,13 +592,13 @@ function unwrapRoutedResult(message, fallback) {
   return message?.result || fallback;
 }
 
-function createCcmParityProtocolServer() {
+function createSdkProtocolServer() {
   const protocolServer = new McpProtocolServer(serverInfo, {
     capabilities: {
       tools: { listChanged: true },
       resources: { listChanged: true },
     },
-    instructions: ccmParityInstructions(),
+    instructions: sdkInstructions(),
   });
 
   const sdkEnvelope = (request) => ({
@@ -653,7 +630,7 @@ function createCcmParityProtocolServer() {
   return protocolServer;
 }
 
-async function handleCcmParityMcp(request, response) {
+async function handleSdkMcp(request, response) {
   const sessionHeader = request.headers['mcp-session-id'];
   const sessionId = typeof sessionHeader === 'string' ? sessionHeader : null;
   let payload = null;
@@ -666,27 +643,27 @@ async function handleCcmParityMcp(request, response) {
     }
   }
 
-  let transport = sessionId ? ccmParityTransports.get(sessionId) : null;
+  let transport = sessionId ? sdkTransports.get(sessionId) : null;
   if (!transport) {
     if (request.method !== 'POST' || sessionId || !isInitializeRequest(payload)) {
       sendJson(response, 400, jsonRpcError(null, -32000, 'Missing or invalid MCP session.'));
       return;
     }
-    const protocolServer = createCcmParityProtocolServer();
+    const protocolServer = createSdkProtocolServer();
     transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
       onsessioninitialized: (newSessionId) => {
-        ccmParityTransports.set(newSessionId, transport);
-        ccmParityServers.set(newSessionId, protocolServer);
+        sdkTransports.set(newSessionId, transport);
+        sdkServers.set(newSessionId, protocolServer);
         appendRouterTrace('SDK', `session_initialized id=${newSessionId}`);
       },
     });
     transport.onclose = async () => {
       const id = transport.sessionId;
       if (!id) return;
-      ccmParityTransports.delete(id);
-      const ownedServer = ccmParityServers.get(id);
-      ccmParityServers.delete(id);
+      sdkTransports.delete(id);
+      const ownedServer = sdkServers.get(id);
+      sdkServers.delete(id);
       if (ownedServer) await ownedServer.close().catch(() => {});
       appendRouterTrace('SDK', `session_closed id=${id}`);
     };
@@ -694,181 +671,6 @@ async function handleCcmParityMcp(request, response) {
   }
 
   await transport.handleRequest(request, response, payload);
-}
-
-function modernDiscovery(id) {
-  return {
-    jsonrpc: '2.0',
-    id,
-    result: modernResult({
-      supportedVersions: [MODERN_PROTOCOL],
-      capabilities: {
-        tools: { listChanged: true },
-        resources: { listChanged: true },
-      },
-      instructions: `Every Desktop Commander tool requires an explicit deviceId. Ordinary WCM tools route directly to the selected worker and are not blocked by the approval test flow. approval_test_exec is an isolated test-only approval path for one frozen hostname action. Default device: ${registry.defaultDeviceId}.\n\n${SPECIALIZED_CAPABILITIES}\n\n${WCM_ERROR_SEMANTICS}`,
-      ttlMs: 5000,
-      cacheScope: 'private',
-    }),
-  };
-}
-
-async function handleModern(payload, response) {
-  const id = payload?.id ?? null;
-  if (payload?.method === 'server/discover') {
-    sendJson(response, 200, modernDiscovery(id));
-    return;
-  }
-  if (RESOURCE_METHODS.has(payload?.method)) {
-    const message = await routeResource(payload, payload);
-    const envelope = message.error
-      ? { jsonrpc: '2.0', id, error: message.error }
-      : { jsonrpc: '2.0', id, result: message.result || {} };
-    sendJson(response, 200, envelope);
-    return;
-  }
-  if (payload?.method === 'tools/list') {
-    const tools = await listTools(payload);
-    sendJson(response, 200, {
-      jsonrpc: '2.0',
-      id,
-      result: { tools },
-    });
-    return;
-  }
-  if (payload?.method === 'tools/call') {
-    const result = enforceToolResultSize(await executeTool(payload, payload), payload);
-    sendJson(response, 200, {
-      jsonrpc: '2.0',
-      id,
-      result,
-    });
-    return;
-  }
-  if (payload?.method === 'ping') {
-    sendJson(response, 200, {
-      jsonrpc: '2.0', id, result: {},
-    });
-    return;
-  }
-  if (payload?.id === undefined || payload?.id === null) {
-    response.statusCode = 202;
-    response.setHeader('Cache-Control', 'no-store');
-    response.end();
-    return;
-  }
-  sendJson(
-    response,
-    200,
-    jsonRpcError(id, -32601, 'Method not found: ' + String(payload?.method || 'unknown')),
-  );
-}
-
-function legacyInitializeResult(payload) {
-  return {
-    jsonrpc: '2.0',
-    id: payload.id,
-    result: {
-      protocolVersion: LEGACY_PROTOCOL,
-      capabilities: { tools: { listChanged: true }, resources: {} },
-      serverInfo,
-      instructions: `Every Desktop Commander tool requires an explicit deviceId. Ordinary WCM tools route directly to the selected worker and are not blocked by the approval test flow. approval_test_exec is an isolated test-only approval path for one frozen hostname action. Default device: ${registry.defaultDeviceId}.\n\n${SPECIALIZED_CAPABILITIES}\n\n${WCM_ERROR_SEMANTICS}`,
-    },
-  };
-}
-async function handleLegacy(payload, request, response) {
-  if (payload?.method === 'initialize') {
-    const sessionId = randomUUID();
-    legacySessions.set(sessionId, {
-      createdAt: Date.now(),
-      initializePayload: payload,
-      toolsListChangedSent: false,
-    });
-    sendSse(response, 200, legacyInitializeResult(payload), sessionId);
-    return;
-  }
-  const sessionId = request.headers['mcp-session-id'];
-  const session = typeof sessionId === 'string' ? legacySessions.get(sessionId) : null;
-  if (!session) {
-    sendJson(response, 400, { error: 'invalid_session', message: 'Invalid or missing session ID.' });
-    return;
-  }
-  if (payload?.method === 'notifications/initialized') {
-    response.statusCode = 202;
-    response.setHeader('Cache-Control', 'no-store');
-    response.end();
-    return;
-  }
-  if (RESOURCE_METHODS.has(payload?.method)) {
-    const message = await routeResource(payload, session.initializePayload, { includeApproval: false });
-    const envelope = message.error
-      ? { jsonrpc: '2.0', id: payload.id, error: message.error }
-      : { jsonrpc: '2.0', id: payload.id, result: message.result || {} };
-    sendSse(response, 200, envelope, sessionId);
-    return;
-  }
-  if (payload?.method === 'tools/list') {
-    const tools = await listTools(session.initializePayload, { includeApproval: false });
-    sendSse(response, 200, {
-      jsonrpc: '2.0', id: payload.id, result: { tools },
-    }, sessionId);
-    return;
-  }
-  if (payload?.method === 'tools/call') {
-    const result = enforceToolResultSize(
-      await executeTool(payload, session.initializePayload, { allowApproval: false }),
-      payload,
-    );
-    sendSse(response, 200, {
-      jsonrpc: '2.0', id: payload.id, result,
-    }, sessionId);
-    return;
-  }
-  if (payload?.method === 'ping') {
-    sendSse(response, 200, {
-      jsonrpc: '2.0', id: payload.id, result: {},
-    }, sessionId);
-    return;
-  }
-  if (payload?.id === undefined || payload?.id === null) {
-    response.statusCode = 202;
-    response.end();
-    return;
-  }
-  sendSse(
-    response,
-    200,
-    jsonRpcError(payload.id, -32601, 'Method not found: ' + String(payload.method)),
-    sessionId,
-  );
-}
-
-function handleLegacyStream(request, response) {
-  const sessionId = request.headers['mcp-session-id'];
-  const session = typeof sessionId === 'string' ? legacySessions.get(sessionId) : null;
-  if (!session) {
-    sendJson(response, 400, { error: 'invalid_session' });
-    return;
-  }
-  response.statusCode = 200;
-  response.setHeader('Content-Type', 'text/event-stream');
-  response.setHeader('Cache-Control', 'no-cache');
-  response.setHeader('Connection', 'keep-alive');
-  response.setHeader('Mcp-Session-Id', sessionId);
-  response.write(': connected\n\n');
-  if (!session.toolsListChangedSent) {
-    response.write(
-      'event: message\ndata: ' + JSON.stringify({
-        jsonrpc: '2.0',
-        method: 'notifications/tools/list_changed',
-      }) + '\n\n',
-    );
-    session.toolsListChangedSent = true;
-  }
-  const timer = setInterval(() => {
-    if (!response.destroyed) response.write(': keepalive\n\n');
-  }, 15000);
-  response.on('close', () => clearInterval(timer));
 }
 
 async function handleRequest(request, response) {
@@ -887,51 +689,17 @@ async function handleRequest(request, response) {
     });
     return;
   }
-  if (url.pathname === CCM_PARITY_MCP_PATH) {
-    if (!['GET', 'POST', 'DELETE'].includes(request.method)) {
-      response.statusCode = 405;
-      response.setHeader('Allow', 'GET, POST, DELETE');
-      response.end();
-      return;
-    }
-    await handleCcmParityMcp(request, response);
-    return;
-  }
-  if (url.pathname !== MCP_PATH) {
+  if (url.pathname !== MCP_PATH && url.pathname !== SDK_ALIAS_MCP_PATH) {
     sendJson(response, 404, { error: 'not_found' });
     return;
   }
-  if (request.method === 'GET') {
-    handleLegacyStream(request, response);
-    return;
-  }
-  if (request.method === 'DELETE') {
-    const sessionId = request.headers['mcp-session-id'];
-    if (typeof sessionId === 'string') legacySessions.delete(sessionId);
-    response.statusCode = 204;
-    response.setHeader('Cache-Control', 'no-store');
-    response.end();
-    return;
-  }
-  if (request.method !== 'POST') {
+  if (!['GET', 'POST', 'DELETE'].includes(request.method)) {
     response.statusCode = 405;
     response.setHeader('Allow', 'GET, POST, DELETE');
     response.end();
     return;
   }
-  const body = await readBody(request);
-  let payload;
-  try { payload = JSON.parse(body); }
-  catch {
-    sendJson(response, 400, jsonRpcError(null, -32700, 'Parse error.'));
-    return;
-  }
-  const protocol = String(request.headers['mcp-protocol-version'] || '');
-  if (protocol === MODERN_PROTOCOL || payload?.method === 'server/discover') {
-    await handleModern(payload, response);
-    return;
-  }
-  await handleLegacy(payload, request, response);
+  await handleSdkMcp(request, response);
 }
 
 const server = http.createServer((request, response) => {
@@ -978,11 +746,11 @@ async function stop() {
   if (stopping) return;
   stopping = true;
   if (pingTimer) clearInterval(pingTimer);
-  for (const transport of ccmParityTransports.values()) {
+  for (const transport of sdkTransports.values()) {
     await transport.close().catch(() => {});
   }
-  ccmParityTransports.clear();
-  ccmParityServers.clear();
+  sdkTransports.clear();
+  sdkServers.clear();
   await hub.stop();
   await new Promise((resolve) => server.close(() => resolve()));
 }

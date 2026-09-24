@@ -19,7 +19,7 @@ async function call(name, args) {
     },
   };
   try {
-    const response = await fetch(`${routerBase}/mcp`, {
+    const response = await fetch(`${routerBase}/mcp-legacy`, {
       method: 'POST', headers, body: JSON.stringify(body), signal: controller.signal,
     });
     if (!response.ok) throw new Error(`${name} returned HTTP ${response.status}`);

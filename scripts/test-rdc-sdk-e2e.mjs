@@ -7,9 +7,10 @@ import { APPROVAL_TEST_UI_URI } from '../router/approval-test-routing.mjs';
 
 const config = loadConfig(process.cwd());
 const sidecarBase = process.env.RDC_E2E_BASE_URL || `http://${config.host}:${config.port}`;
-const localRouterUrl = new URL(process.env.WCM_CCM_PARITY_ROUTER_URL || 'http://127.0.0.1:18009/mcp-ccm');
-const parityResource = new URL('/rdc/mcp-ccm', config.resource).toString();
-const redirectUri = 'http://127.0.0.1:19003/rdc-ccm-parity-e2e-callback';
+const localRouterUrl = new URL(process.env.WCM_SDK_ROUTER_URL || 'http://127.0.0.1:18009/mcp');
+const sdkResource = config.resource;
+const sdkAliasResource = new URL('/rdc/mcp-ccm', config.resource).toString();
+const redirectUri = 'http://127.0.0.1:19003/rdc-sdk-e2e-callback';
 let stage = 'startup';
 
 async function request(path, options = {}) {
@@ -33,11 +34,16 @@ function randomVerifier() {
 }
 
 async function getAccessToken(approvalSecret) {
-  stage = 'parity resource discovery';
-  const metadata = await request('/.well-known/oauth-protected-resource/rdc/mcp-ccm');
+  stage = 'SDK resource discovery';
+  const metadata = await request('/.well-known/oauth-protected-resource/rdc/mcp');
   requireStatus(metadata, 200);
-  if (metadata.json?.resource !== parityResource) {
-    throw new Error(`parity resource metadata mismatch: ${metadata.json?.resource}`);
+  if (metadata.json?.resource !== sdkResource) {
+    throw new Error(`SDK resource metadata mismatch: ${metadata.json?.resource}`);
+  }
+  const aliasMetadata = await request('/.well-known/oauth-protected-resource/rdc/mcp-ccm');
+  requireStatus(aliasMetadata, 200);
+  if (aliasMetadata.json?.resource !== sdkAliasResource) {
+    throw new Error(`SDK alias resource metadata mismatch: ${aliasMetadata.json?.resource}`);
   }
 
   stage = 'registration';
@@ -45,7 +51,7 @@ async function getAccessToken(approvalSecret) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      client_name: 'Windows Console CCM parity E2E',
+      client_name: 'Windows Console SDK E2E',
       redirect_uris: [redirectUri],
       grant_types: ['authorization_code', 'refresh_token'],
       response_types: ['code'],
@@ -64,9 +70,9 @@ async function getAccessToken(approvalSecret) {
     response_type: 'code',
     code_challenge: createPkceChallenge(verifier),
     code_challenge_method: 'S256',
-    resource: parityResource,
+    resource: sdkResource,
     scope: 'mcp',
-    state: 'ccm-parity-e2e',
+    state: 'sdk-e2e',
   }).toString());
   requireStatus(authorization, 302);
   const consentLocation = new URL(authorization.response.headers.get('location'));
@@ -94,11 +100,11 @@ async function getAccessToken(approvalSecret) {
       code,
       redirect_uri: redirectUri,
       code_verifier: verifier,
-      resource: parityResource,
+      resource: sdkResource,
     }).toString(),
   });
   requireStatus(token, 200);
-  if (token.json?.resource !== parityResource) throw new Error('token resource mismatch.');
+  if (token.json?.resource !== sdkResource) throw new Error('token resource mismatch.');
   if (!token.json?.access_token || !token.json?.refresh_token) throw new Error('token response was incomplete.');
   return {
     accessToken: token.json.access_token,
@@ -110,7 +116,7 @@ async function connectClient(url, accessToken = null) {
   const transport = new StreamableHTTPClientTransport(url, accessToken ? {
     requestInit: { headers: { Authorization: `Bearer ${accessToken}` } },
   } : undefined);
-  const client = new Client({ name: 'wcm-ccm-parity-e2e', version: '1.0.0' });
+  const client = new Client({ name: 'wcm-sdk-e2e', version: '1.0.0' });
   await client.connect(transport);
   return { client, transport };
 }
@@ -142,10 +148,10 @@ async function verifySurface(client, { exerciseApproval = false } = {}) {
   const deviceId = deviceInfo.defaultDeviceId || deviceInfo.devices?.find((item) => item.online)?.deviceId;
   if (!deviceId) throw new Error('list_devices did not return a target device.');
 
-  const sessionMeta = { 'openai/session': 'wcm-ccm-parity-e2e-session' };
+  const sessionMeta = { 'openai/session': 'wcm-sdk-e2e-session' };
   const frozen = await client.callTool({
     name: 'approval_test_exec',
-    arguments: { deviceId, justification: 'CCM parity transport E2E deny test.' },
+    arguments: { deviceId, justification: 'SDK transport E2E deny test.' },
   });
   const approvalId = frozen.structuredContent?.approval_id;
   if (!approvalId) throw new Error('approval_test_exec did not return approval_id.');
@@ -181,7 +187,7 @@ async function main() {
   const { accessToken, refreshToken } = await getAccessToken(approvalSecret);
 
   stage = 'sidecar SDK transport';
-  const sidecar = await connectClient(new URL(sidecarBase + '/rdc/mcp-ccm'), accessToken);
+  const sidecar = await connectClient(new URL(sidecarBase + '/rdc/mcp'), accessToken);
   try {
     await verifySurface(sidecar.client, { exerciseApproval: true });
     if (!sidecar.transport.sessionId) throw new Error('sidecar SDK transport did not preserve MCP session state.');
@@ -197,14 +203,15 @@ async function main() {
   });
   requireStatus(revoke, 200);
 
-  console.log('RDC CCM parity E2E: PASS');
+  console.log('RDC SDK MCP E2E: PASS');
   console.log('router_sdk_streamable_http=PASS');
-  console.log('sidecar_oauth_resource_alias=PASS');
+  console.log('sidecar_oauth_resource=PASS');
+  console.log('sidecar_sdk_alias_discovery=PASS');
   console.log('sidecar_sdk_session=PASS');
   console.log('approval_deny_roundtrip=PASS');
 }
 
 main().catch((error) => {
-  console.error(`RDC CCM parity E2E: FAIL at ${stage}. ${String(error?.message || error)}`);
+  console.error(`RDC SDK MCP E2E: FAIL at ${stage}. ${String(error?.message || error)}`);
   process.exitCode = 1;
 });

@@ -12,12 +12,12 @@
     "postinstall": "node scripts/apply-desktop-commander-image-guard.mjs",
     "check:ui": "node scripts/test-ui-bundle.mjs",
     "test": "npm run check:ui && node scripts/test-approval-test.mjs && node scripts/test-router-routing-contract.mjs && node scripts/test-self-contained.mjs",
-    "test:live": "npm run check:ui && node scripts/test-rdc-e2e.mjs && node scripts/test-rdc-modern-e2e.mjs && node scripts/test-rpc-concurrency.mjs",
+    "test:live": "npm run check:ui && node scripts/test-rdc-sdk-e2e.mjs && node scripts/test-rdc-e2e.mjs && node scripts/test-rdc-legacy-modern-e2e.mjs && node scripts/test-rpc-legacy-concurrency.mjs",
     "test:all": "npm test && npm run test:live",
     "test:legacy": "node scripts/test-rdc-e2e.mjs",
-    "test:modern": "npm run check:ui && node scripts/test-rdc-modern-e2e.mjs",
-    "test:ccm-parity": "npm run check:ui && node scripts/test-rdc-ccm-parity-e2e.mjs",
-    "test:concurrency": "node scripts/test-rpc-concurrency.mjs"
+    "test:modern": "npm run check:ui && node scripts/test-rdc-sdk-e2e.mjs",
+    "test:legacy-modern": "npm run check:ui && node scripts/test-rdc-legacy-modern-e2e.mjs",
+    "test:legacy-concurrency": "node scripts/test-rpc-legacy-concurrency.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.1",

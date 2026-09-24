@@ -23,7 +23,7 @@ Controller
        `- remote workers  deviceId=remote-worker, ...
 ```
 
-The controller supports both legacy stateful MCP and stateless MCP `2026-07-28` with `server/discover`.
+The public `/rdc/mcp` endpoint uses the MCP SDK `StreamableHTTPServerTransport`, matching CCM's standard initialize/session lifecycle. The previous custom stateful/`2026-07-28` transports remain available only on the controller's local `/rdc/mcp-legacy` test path and are not exposed through the Funnel.
 
 ## Controller setup
 
@@ -63,9 +63,9 @@ The current approval work is isolated behind one test-only execution path:
 3. The card calls the app-only `resolve_pending_action` tool. Approve dispatches only the frozen command to the target worker through `start_process`; Deny does not dispatch it.
 4. The App writes the terminal result into model context and asks ChatGPT to continue without reconstructing the command.
 
-The modern ChatGPT-facing approval surface follows the currently working CCM wire contract: approval tools and the approval resource are ordinary modern MCP tools/resources without a separate UI capability negotiation layer. `request_approval` carries `ui.resourceUri`, `ui/resourceUri`, `openai/outputTemplate`, and `openai/widgetAccessible`; `resolve_pending_action` is app-only and widget-accessible. The legacy stateful transport remains ordinary-WCM-only and does not expose the approval-test tools or approval resource.
+The ChatGPT-facing approval surface follows the currently working CCM wire contract: approval tools and the approval resource are ordinary MCP tools/resources without a separate UI capability negotiation layer. `request_approval` carries `ui.resourceUri`, `ui/resourceUri`, `openai/outputTemplate`, and `openai/widgetAccessible`; `resolve_pending_action` is app-only and widget-accessible. Android approval rendering and both Deny and Approve flows have been verified on the SDK transport. The legacy transport remains ordinary-WCM-only and does not expose the approval-test tools or approval resource.
 
-For transport-level A/B validation, WCM also exposes `/rdc/mcp-ccm`. It uses the same OAuth issuer and WCM business routing but runs the Host-facing connection through the MCP SDK `StreamableHTTPServerTransport`, matching CCM's initialize/session lifecycle. The existing `/rdc/mcp` endpoint remains unchanged while this parity path is being validated.
+`/rdc/mcp-ccm` is retained temporarily as an SDK-transport alias for the already-deployed `mcpccm` ChatGPT registration. New or rebuilt WCM registrations should use the canonical `/rdc/mcp` endpoint. `/rdc/mcp-legacy` is local-only and exists solely for regression tests.
 
 The approval View is one static `String.raw` HTML document intentionally kept structurally aligned with CCM's current working approval View. It uses the same classic inline-script layout, `ui/initialize` / `ui/notifications/initialized` lifecycle, tool-result notifications, `tools/call`, `ui/update-model-context`, and ChatGPT `window.openai` globals (`toolResponseMetadata`, `toolOutput`, `openai:set_globals`, intrinsic-height notification, and follow-up continuation). The resource path is fixed at `ui://wcm/approval-v1.html`, matching CCM's fixed-URI pattern while keeping the WCM namespace distinct.
 
@@ -86,10 +86,11 @@ To exercise an already configured live controller and sidecar, run:
 
 ```powershell
 npm run test:live
-npm run test:ccm-parity
+npm run test:modern
+npm run test:legacy-modern
 ```
 
-The live suite covers legacy OAuth/stateful MCP, MCP `2026-07-28`, the CCM-aligned ChatGPT approval surface, the isolated approval-test execution path, direct ordinary-tool routing, device routing, resources, and duplicate external JSON-RPC IDs. It uses the configured OAuth deployment and can register test clients and execute the frozen approval-test command on the target worker, so it is intentionally separate from the default CI test.
+The live suite covers the canonical SDK Streamable HTTP endpoint, the rollback stateful transport, the rollback custom `2026-07-28` transport, the CCM-aligned ChatGPT approval surface, the isolated approval-test execution path, direct ordinary-tool routing, device routing, resources, and duplicate external JSON-RPC IDs. It uses the configured OAuth deployment and can register test clients and exercise the frozen approval-test flow on the target worker, so it is intentionally separate from the default CI test.
 
 The public endpoint is configured by `RDC_RESOURCE`. With a Tailscale Funnel hostname it typically looks like:
 
@@ -114,8 +115,8 @@ Write-Output ("WCM URL: " + $wcmUrl)
 
 When a live WCM deployment behaves differently from the checked-out code, debug the runtime path before changing client configuration. The most common failure modes are stale processes, worker connection churn, or a tool-discovery request that never completed.
 
-- **Code on disk is not proof that the live process reloaded it.** Compare the running router/worker PIDs and start times with the change you expect to be live. Then query the live router directly (`server/discover`, `tools/list`, or the relevant tool call) instead of inferring state from the checkout alone. After a restart, confirm that the PID changed and that `list_devices` works again.
-- **A `tools/list` timeout can look like stale schema or client caching.** Inspect MCP BEGIN/END log pairs and elapsed time. If `server/discover` succeeds but `tools/list` is missing an END record, is cancelled, or takes tens of seconds, fix that transport/runtime failure first. Once healthy, `tools/list` should normally complete quickly and consistently.
+- **Code on disk is not proof that the live process reloaded it.** Compare the running router/worker PIDs and start times with the change you expect to be live. Then query the live SDK endpoint with `initialize`, `tools/list`, or the relevant tool call instead of inferring state from the checkout alone. After a restart, confirm that the PID changed and that `list_devices` works again.
+- **A `tools/list` timeout can look like stale schema or client caching.** Inspect MCP BEGIN/END log pairs, session IDs, and elapsed time. If initialize succeeds but `tools/list` is missing an END record, is cancelled, or takes tens of seconds, fix that transport/runtime failure first. Once healthy, `tools/list` should normally complete quickly and consistently.
 - **Only one active worker should own a given `deviceId`.** Duplicate or orphaned workers using the same ID can repeatedly replace each other's connection, causing reconnect loops and invalidating in-flight RPCs. Check worker-hub logs for frequent `Worker connected` messages and inspect process parentage. Keep the supervisor-owned worker and terminate stale/manual copies rather than starting another copy on top of them.
 - **Large tool results are capped at the router boundary.** `tools/call` results larger than 512 KiB are replaced with a compact error before they reach the MCP client (`WC_MAX_TOOL_RESULT_BYTES` can override the limit). Large images are previewed at a 64 KiB raw budget, and `read_multiple_files` advertises a four-image batch limit to avoid cumulative media payload spikes.
 - **Connection replacement should fail pending RPCs promptly.** A `Worker connection replaced` or `Worker disconnected` error is preferable to waiting for the full RPC timeout. Retry after the worker stabilizes; do not treat a long timeout as evidence that the requested tool is unsupported.
@@ -125,7 +126,7 @@ When a live WCM deployment behaves differently from the checked-out code, debug 
 - **Do not treat a single network/site failure as proof that WCM or a device is unavailable.** `Network is unreachable`, DNS failures, timeouts, connection resets, HTTP 403/404, and target-site verification/challenges can be transient or site-specific. Check `list_devices`, retry transient requests 2-3 times when appropriate, and use `curl` or another source when useful. Only conclude that WCM/device connectivity is unavailable when the device is reported offline or repeated harmless local WCM checks fail.
 - **For slow network operations, separate process start from result collection.** Start the command with a short initial wait so the MCP call can return a PID/session, then use `read_process_output` to collect the result. This is more robust for operations such as remote pushes or downloads than keeping one MCP request open for the entire network operation.
 - **Avoid manual parallel launches on a supervised controller.** Prefer the repository's supervisor/restart scripts. Manual router or worker instances are useful only on isolated test ports and must be cleaned up afterward. Before running disruptive tests, read `AGENTS.md` and avoid using the same live WCM transport that the test may restart.
-- **Verify client-visible schema, not just tool count or tool names.** When testing discovery changes, inspect the actual `tools/list` descriptions and `server/discover.instructions` received by the client. A normal tool count only proves the list was structurally available; it does not prove updated descriptions or instructions were loaded.
+- **Verify client-visible schema, not just tool count or tool names.** When testing discovery changes, inspect the actual `tools/list` descriptions, server instructions, resources, and tool metadata received by the SDK client. A normal tool count only proves the list was structurally available; it does not prove updated descriptions or instructions were loaded.
 - **Keep unrelated worktree changes out of operational fixes.** Check `git status`, stage only the intended files, run `git diff --cached --check`, then commit and push. A live checkout often contains local experiments or runtime-only edits that should not be bundled into an unrelated repair.
 
 ## Security

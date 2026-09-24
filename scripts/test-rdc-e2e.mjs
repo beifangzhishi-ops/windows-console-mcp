@@ -4,6 +4,7 @@ import { createPkceChallenge } from '../rdc-sidecar/oauth.mjs';
 
 const config = loadConfig(process.cwd());
 const baseUrl = process.env.RDC_E2E_BASE_URL || 'http://' + config.host + ':' + config.port;
+const legacyResource = new URL('/rdc/mcp-legacy', config.resource).toString();
 const redirectUri = 'http://127.0.0.1:19001/rdc-e2e-callback';
 let stage = 'startup';
 
@@ -72,7 +73,7 @@ async function runRound(round, approvalSecret) {
     response_type: 'code',
     code_challenge: challenge,
     code_challenge_method: 'S256',
-    resource: config.resource,
+    resource: legacyResource,
     scope: 'mcp',
     state: 'rdc-e2e-state-' + round,
   });
@@ -105,7 +106,7 @@ async function runRound(round, approvalSecret) {
     code: authorizationCode,
     redirect_uri: redirectUri,
     code_verifier: verifier,
-    resource: config.resource,
+    resource: legacyResource,
   });
   const token = await request('/rdc/token', {
     method: 'POST',
@@ -127,7 +128,7 @@ async function runRound(round, approvalSecret) {
       grant_type: 'refresh_token',
       client_id: clientId,
       refresh_token: initialRefreshToken,
-      resource: config.resource,
+      resource: legacyResource,
     }).toString(),
   });
   requireStatus(refresh, 200);
@@ -143,7 +144,7 @@ async function runRound(round, approvalSecret) {
     'Content-Type': 'application/json',
   };
   stage = stagePrefix + 'initialize through upstream';
-  const initialize = await request('/rdc/mcp', {
+  const initialize = await request('/rdc/mcp-legacy', {
     method: 'POST',
     headers: mcpHeaders,
     body: JSON.stringify({
@@ -168,7 +169,7 @@ async function runRound(round, approvalSecret) {
   }
 
   stage = stagePrefix + 'tools/list through upstream';
-  const tools = await request('/rdc/mcp', {
+  const tools = await request('/rdc/mcp-legacy', {
     method: 'POST',
     headers: { ...mcpHeaders, 'Mcp-Session-Id': sessionId },
     body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }),
@@ -198,7 +199,7 @@ async function runRound(round, approvalSecret) {
 
   const filePreviewUri = 'ui://desktop-commander/file-preview';
   stage = stagePrefix + 'resources/list through upstream';
-  const resourcesResponse = await request('/rdc/mcp', {
+  const resourcesResponse = await request('/rdc/mcp-legacy', {
     method: 'POST',
     headers: { ...mcpHeaders, 'Mcp-Session-Id': sessionId },
     body: JSON.stringify({ jsonrpc: '2.0', id: round * 10 + 2, method: 'resources/list', params: {} }),
@@ -213,7 +214,7 @@ async function runRound(round, approvalSecret) {
   }
 
   stage = stagePrefix + 'resources/read through upstream';
-  const resourceReadResponse = await request('/rdc/mcp', {
+  const resourceReadResponse = await request('/rdc/mcp-legacy', {
     method: 'POST',
     headers: { ...mcpHeaders, 'Mcp-Session-Id': sessionId },
     body: JSON.stringify({ jsonrpc: '2.0', id: round * 10 + 5, method: 'resources/read', params: { uri: filePreviewUri } }),
@@ -225,7 +226,7 @@ async function runRound(round, approvalSecret) {
   }
 
   stage = stagePrefix + 'device discovery';
-  const deviceList = await request('/rdc/mcp', {
+  const deviceList = await request('/rdc/mcp-legacy', {
     method: 'POST',
     headers: { ...mcpHeaders, 'Mcp-Session-Id': sessionId },
     body: JSON.stringify({
@@ -244,7 +245,7 @@ async function runRound(round, approvalSecret) {
   if (!targetDeviceId) throw new Error('No online/default device was available.');
 
   stage = stagePrefix + 'ordinary direct routing';
-  const ordinaryTool = await request('/rdc/mcp', {
+  const ordinaryTool = await request('/rdc/mcp-legacy', {
     method: 'POST',
     headers: { ...mcpHeaders, 'Mcp-Session-Id': sessionId },
     body: JSON.stringify({
@@ -264,7 +265,7 @@ async function runRound(round, approvalSecret) {
   }
 
   stage = stagePrefix + 'MCP session cleanup';
-  const closeSession = await request('/rdc/mcp', {
+  const closeSession = await request('/rdc/mcp-legacy', {
     method: 'DELETE',
     headers: { ...mcpHeaders, 'Mcp-Session-Id': sessionId },
   });
@@ -279,7 +280,7 @@ async function runRound(round, approvalSecret) {
     body: new URLSearchParams({ token: refreshToken }).toString(),
   });
   requireStatus(revoke, 200);
-  const revoked = await request('/rdc/mcp', {
+  const revoked = await request('/rdc/mcp-legacy', {
     method: 'POST',
     headers: mcpHeaders,
     body: JSON.stringify({ jsonrpc: '2.0', id: round * 10 + 4, method: 'tools/list', params: {} }),
