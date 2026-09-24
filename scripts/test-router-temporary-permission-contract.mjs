@@ -65,6 +65,12 @@ const merged = mergeTemporaryPermissionResourceList({
 assert.ok(merged.result.resources.some((resource) => resource.uri === 'ui://worker/existing'));
 assert.ok(merged.result.resources.some((resource) => resource.uri === TEMP_PERMISSION_UI_URI));
 assert.equal(
+  merged.result.resources.filter((resource) =>
+    typeof resource?.uri === 'string' && resource.uri.startsWith('ui://wcm/temporary-permission-')
+  ).length,
+  1,
+);
+assert.equal(
   merged.result.resources.filter((resource) => resource.uri === TEMP_PERMISSION_UI_URI).length,
   1,
 );

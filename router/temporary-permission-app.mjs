@@ -1,4 +1,4 @@
-export const TEMP_PERMISSION_UI_URI = 'ui://wcm/temporary-permission-v1.html';
+export const TEMP_PERMISSION_UI_URI = 'ui://wcm/temporary-permission-v2.html';
 
 export const TEMP_PERMISSION_UI_HTML = String.raw`<!doctype html>
 <html lang="en">

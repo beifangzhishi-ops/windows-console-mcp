@@ -155,7 +155,7 @@ try {
     deviceId: 'device-a',
   }).ok, false);
 
-  assert.equal(TEMP_PERMISSION_UI_URI, 'ui://wcm/temporary-permission-v1.html');
+  assert.equal(TEMP_PERMISSION_UI_URI, 'ui://wcm/temporary-permission-v2.html');
   assert.match(TEMP_PERMISSION_UI_HTML, /Approve for/);
   assert.match(TEMP_PERMISSION_UI_HTML, /approval_nonce/);
   assert.match(TEMP_PERMISSION_UI_HTML, /resolve_temporary_permission/);

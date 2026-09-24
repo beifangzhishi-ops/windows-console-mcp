@@ -190,14 +190,14 @@ async function runRound(round, approvalSecret) {
   }
   const permissionRequestTool = toolList.find((tool) => tool.name === 'request_temporary_permission');
   if (permissionRequestTool?._meta?.['openai/outputTemplate'] !==
-      'ui://wcm/temporary-permission-v1.html') {
+      'ui://wcm/temporary-permission-v2.html') {
     throw new Error('Temporary permission tool did not expose the WCM approval card.');
   }
   const screenshotTool = { name: 'not-applicable' };
   const safeToolName = 'get_config';
 
   const filePreviewUri = 'ui://desktop-commander/file-preview';
-  const permissionUiUri = 'ui://wcm/temporary-permission-v1.html';
+  const permissionUiUri = 'ui://wcm/temporary-permission-v2.html';
   stage = stagePrefix + 'resources/list through upstream';
   const resourcesResponse = await request('/rdc/mcp', {
     method: 'POST',

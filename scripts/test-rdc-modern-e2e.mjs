@@ -147,7 +147,7 @@ async function runModern(approvalSecret) {
   if (!getConfigTool.inputSchema?.required?.includes('permissionId')) {
     throw new Error('get_config does not require permissionId.');
   }
-  if (requestPermissionTool._meta?.['openai/outputTemplate'] !== 'ui://wcm/temporary-permission-v1.html') {
+  if (requestPermissionTool._meta?.['openai/outputTemplate'] !== 'ui://wcm/temporary-permission-v2.html') {
     throw new Error('request_temporary_permission did not expose the WCM approval card.');
   }
   if (requestPermissionTool._meta?.ui?.visibility?.join(',') !== 'model,app') {
@@ -236,7 +236,7 @@ async function runModern(approvalSecret) {
   const resourcesResult = await mcp(accessToken, 7, 'resources/list', {});
   const resources = resourcesResult?.resources;
   const filePreviewUri = 'ui://desktop-commander/file-preview';
-  const permissionUiUri = 'ui://wcm/temporary-permission-v1.html';
+  const permissionUiUri = 'ui://wcm/temporary-permission-v2.html';
   if (!Array.isArray(resources) || !resources.some((item) => item?.uri === filePreviewUri)) {
     throw new Error('resources/list did not include file preview UI.');
   }
