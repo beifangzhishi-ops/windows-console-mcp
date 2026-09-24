@@ -86,7 +86,7 @@ To exercise an already configured live controller and sidecar, run:
 npm run test:live
 ```
 
-The live suite covers legacy OAuth/stateful MCP, MCP `2026-07-28`, temporary-permission request/approval/revocation, device routing, resources, and duplicate external JSON-RPC IDs. It uses the configured OAuth deployment and can register test clients and short-lived WCM permissions, so it is intentionally separate from the default CI test.
+The live suite covers legacy OAuth/stateful MCP, MCP `2026-07-28`, the isolated approval-test execution path, the ordinary permission boundary, device routing, resources, and duplicate external JSON-RPC IDs. It uses the configured OAuth deployment and can register test clients and execute the frozen approval-test command on the target worker, so it is intentionally separate from the default CI test.
 
 The public endpoint is configured by `RDC_RESOURCE`. With a Tailscale Funnel hostname it typically looks like:
 
@@ -96,12 +96,26 @@ https://your-machine.your-tailnet.ts.net/rdc/mcp
 
 `RDC_ISSUER` and `RDC_RESOURCE` are deployment-specific and are never hard-coded by the sidecar.
 
+### Rebuilding host tools after a schema change
+
+The MCP host may keep an older tool schema after the WCM Router has already reloaded new code. An OAuth reconnect alone does not guarantee a tool-schema refresh. If direct `server/discover` / `tools/list` checks show the current Router schema but the host still exposes old WCM tools, rebuild or recreate the host-side WCM MCP tool registration/connector so the host performs fresh discovery. Then start a fresh chat/session and verify the actual client-visible tool names, descriptions, schemas, and MCP App metadata before changing the server again.
+
+For this controller checkout, the following PowerShell commands use absolute paths and print the configured WCM key and public MCP URL. The key command prints secret material to the local console; do not paste its output into logs, commits, screenshots, or shared terminals.
+
+```powershell
+# Print the WCM approval key.
+Get-Content -LiteralPath "C:\Users\Songjx\Documents\ChatGPT\windows-console-mcp\.state\rdc-approval-secret.txt" -Raw
+
+# Print only the configured public MCP URL (RDC_RESOURCE).
+((Get-Content -LiteralPath "C:\Users\Songjx\Documents\ChatGPT\windows-console-mcp\config\rdc.env" | Where-Object { $_ -match '^\s*RDC_RESOURCE\s*=' } | Select-Object -First 1) -replace '^\s*RDC_RESOURCE\s*=\s*','').Trim()
+```
+
 ## Troubleshooting
 
 When a live WCM deployment behaves differently from the checked-out code, debug the runtime path before changing client configuration. The most common failure modes are stale processes, worker connection churn, or a tool-discovery request that never completed.
 
 - **Code on disk is not proof that the live process reloaded it.** Compare the running router/worker PIDs and start times with the change you expect to be live. Then query the live router directly (`server/discover`, `tools/list`, or the relevant tool call) instead of inferring state from the checkout alone. After a restart, confirm that the PID changed and that `list_devices` works again.
-- **OAuth reconnect and tool-schema refresh are separate events.** Reconnecting a client can refresh credentials without causing it to request `server/discover` or `tools/list` again. Use sidecar logs to verify that a discovery/list request actually arrived and completed. If the server response is current but an existing chat still shows an older schema, test with a fresh client/session before changing the server again.
+- **OAuth reconnect and tool-schema refresh are separate events.** Reconnecting a client can refresh credentials without causing it to request `server/discover` or `tools/list` again. Use sidecar logs to verify that a discovery/list request actually arrived and completed. If the server response is current but the host still exposes an older schema, rebuild/recreate the host-side WCM MCP tool registration/connector, then use a fresh chat/session and verify the client-visible schema before changing the server again.
 - **A `tools/list` timeout can look like stale schema or client caching.** Inspect MCP BEGIN/END log pairs and elapsed time. If `server/discover` succeeds but `tools/list` is missing an END record, is cancelled, or takes tens of seconds, fix that transport/runtime failure first. Once healthy, `tools/list` should normally complete quickly and consistently.
 - **Only one active worker should own a given `deviceId`.** Duplicate or orphaned workers using the same ID can repeatedly replace each other's connection, causing reconnect loops and invalidating in-flight RPCs. Check worker-hub logs for frequent `Worker connected` messages and inspect process parentage. Keep the supervisor-owned worker and terminate stale/manual copies rather than starting another copy on top of them.
 - **Large tool results are capped at the router boundary.** `tools/call` results larger than 512 KiB are replaced with a compact error before they reach the MCP client (`WC_MAX_TOOL_RESULT_BYTES` can override the limit). Large images are previewed at a 64 KiB raw budget, and `read_multiple_files` advertises a four-image batch limit to avoid cumulative media payload spikes.
