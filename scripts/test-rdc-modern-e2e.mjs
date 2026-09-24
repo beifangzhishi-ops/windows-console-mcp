@@ -185,9 +185,13 @@ async function runModern(approvalSecret) {
   if (resolveApprovalTestTool._meta?.ui?.visibility?.join(',') !== 'app') {
     throw new Error('resolve_approval_test is not app-only.');
   }
-  if (Object.keys(requestApprovalTestTool._meta || {}).join(',') !== 'ui' ||
-      Object.keys(resolveApprovalTestTool._meta || {}).join(',') !== 'ui') {
-    throw new Error('approval tools expose metadata outside the current MCP Apps ui namespace.');
+  if (requestApprovalTestTool._meta?.['ui/resourceUri'] !== APPROVAL_TEST_UI_URI ||
+      requestApprovalTestTool._meta?.['openai/outputTemplate'] !== APPROVAL_TEST_UI_URI ||
+      requestApprovalTestTool._meta?.['openai/widgetAccessible'] !== true) {
+    throw new Error('request_approval_test did not expose the required ChatGPT approval metadata.');
+  }
+  if (resolveApprovalTestTool._meta?.['openai/widgetAccessible'] !== true) {
+    throw new Error('resolve_approval_test did not expose ChatGPT app accessibility metadata.');
   }
   for (const name of ['read_file', 'edit_block']) {
     const tool = tools.find((candidate) => candidate?.name === name);

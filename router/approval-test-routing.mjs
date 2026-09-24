@@ -70,6 +70,9 @@ export function approvalTestRouterTools(deviceSchema) {
       },
       _meta: {
         ui: { resourceUri: APPROVAL_TEST_UI_URI, visibility: ['model', 'app'] },
+        'ui/resourceUri': APPROVAL_TEST_UI_URI,
+        'openai/outputTemplate': APPROVAL_TEST_UI_URI,
+        'openai/widgetAccessible': true,
       },
       inputSchema: {
         type: 'object',
@@ -91,6 +94,7 @@ export function approvalTestRouterTools(deviceSchema) {
       },
       _meta: {
         ui: { visibility: ['app'] },
+        'openai/widgetAccessible': true,
       },
       inputSchema: {
         type: 'object',

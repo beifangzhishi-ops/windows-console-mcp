@@ -41,7 +41,11 @@ assert.equal(testExec.inputSchema.properties.command, undefined);
 assert.deepEqual(requestCard.inputSchema.required, ['approval_id']);
 assert.equal(requestCard._meta?.ui?.resourceUri, APPROVAL_TEST_UI_URI);
 assert.deepEqual(requestCard._meta?.ui?.visibility, ['model', 'app']);
+assert.equal(requestCard._meta?.['ui/resourceUri'], APPROVAL_TEST_UI_URI);
+assert.equal(requestCard._meta?.['openai/outputTemplate'], APPROVAL_TEST_UI_URI);
+assert.equal(requestCard._meta?.['openai/widgetAccessible'], true);
 assert.deepEqual(resolver._meta?.ui?.visibility, ['app']);
+assert.equal(resolver._meta?.['openai/widgetAccessible'], true);
 assert.equal(resolver.inputSchema.properties.approval_id.format, 'uuid');
 assert.equal(resolver.inputSchema.properties.approval_nonce.minLength, 20);
 
