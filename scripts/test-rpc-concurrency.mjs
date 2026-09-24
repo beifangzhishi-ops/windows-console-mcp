@@ -23,53 +23,48 @@ async function call(name, args) {
     clearTimeout(timer);
   }
 }
-const permissionRequest = await call('request_temporary_permission', {
-  deviceId,
-  justification: 'RPC concurrency regression temporary permission.',
-});
-const approvalId = permissionRequest?.structuredContent?.approval_id;
-const approvalNonce = permissionRequest?._meta?.approval_nonce;
-if (!approvalId || !approvalNonce) {
-  throw new Error('Temporary permission request did not return approval details.');
-}
-const permissionApproval = await call('resolve_temporary_permission', {
-  approval_id: approvalId,
-  approval_nonce: approvalNonce,
-  decision: 'approve',
-});
-const permissionId = permissionApproval?.structuredContent?.permission_id;
-if (!permissionId) throw new Error('Temporary permission approval did not issue permission_id.');
 
-const platformResult = await call('get_config', { deviceId, permissionId });
-const platformText = platformResult?.content?.[0]?.text || '';
-const jsonStart = platformText.indexOf('{');
-if (jsonStart < 0) throw new Error('Target get_config response did not contain JSON.');
-let platformConfig;
-try { platformConfig = JSON.parse(platformText.slice(jsonStart)); }
-catch { throw new Error('Could not parse target get_config response.'); }
-const isWindows = platformConfig?.systemInfo?.isWindows === true;
-const slowArgs = isWindows
-  ? {
-      deviceId,
-      permissionId,
-      command: "Start-Sleep -Milliseconds 500; Write-Output CONCURRENCY_SLOW_OK",
-      timeout_ms: 3000,
-      shell: 'powershell.exe',
-    }
-  : {
-      deviceId,
-      permissionId,
-      command: "sleep 0.5; printf 'CONCURRENCY_SLOW_OK\\n'",
-      timeout_ms: 3000,
-      shell: '/bin/sh',
-    };
-const [slow, config] = await Promise.all([
-  call('start_process', slowArgs),
-  call('get_config', { deviceId, permissionId }),
+async function prepare(command) {
+  const frozen = await call('approval_test_exec', {
+    deviceId,
+    command,
+    timeout_ms: 5000,
+  });
+  const approvalId = frozen?.structuredContent?.approval_id;
+  if (!approvalId) throw new Error('approval_test_exec did not return approval_id.');
+  const card = await call('request_approval_test', { approval_id: approvalId });
+  const approvalNonce = card?._meta?.approval_nonce;
+  if (!approvalNonce) throw new Error('request_approval_test did not return approval nonce.');
+  return { approvalId, approvalNonce };
+}
+
+const slow = await prepare(
+  `node -e "setTimeout(() => console.log('CONCURRENCY_SLOW_OK'), 500)"`,
+);
+const fast = await prepare(
+  `node -e "console.log('CONCURRENCY_FAST_OK')"`,
+);
+
+const [slowResult, fastResult] = await Promise.all([
+  call('resolve_approval_test', {
+    approval_id: slow.approvalId,
+    approval_nonce: slow.approvalNonce,
+    decision: 'approve',
+  }),
+  call('resolve_approval_test', {
+    approval_id: fast.approvalId,
+    approval_nonce: fast.approvalNonce,
+    decision: 'approve',
+  }),
 ]);
-const slowText = slow?.content?.[0]?.text || '';
-const configText = config?.content?.[0]?.text || '';
-if (!slowText.includes('CONCURRENCY_SLOW_OK')) throw new Error('start_process response was mismatched or incomplete.');
-if (!configText.includes('blockedCommands')) throw new Error('get_config response was mismatched or incomplete.');
-await call('revoke_temporary_permission', { deviceId, permissionId });
+
+const slowText = String(slowResult?.structuredContent?.output || '');
+const fastText = String(fastResult?.structuredContent?.output || '');
+if (!slowText.includes('CONCURRENCY_SLOW_OK')) {
+  throw new Error('Slow approval test response was mismatched or incomplete.');
+}
+if (!fastText.includes('CONCURRENCY_FAST_OK')) {
+  throw new Error('Fast approval test response was mismatched or incomplete.');
+}
+
 console.log(`RPC concurrency regression passed for ${deviceId}: duplicate external id=0 remained correctly correlated.`);

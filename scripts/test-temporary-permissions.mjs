@@ -1,15 +1,9 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import {
-  TemporaryPermissionManager,
-  TEMP_PERMISSION_DEFAULT_SECONDS,
-} from '../router/temporary-permissions.mjs';
-import {
-  TEMP_PERMISSION_UI_HTML,
-  TEMP_PERMISSION_UI_URI,
-} from '../router/temporary-permission-app.mjs';
+import { TemporaryPermissionManager } from '../router/temporary-permissions.mjs';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const testStateRoot = path.join(rootDir, '.state');
@@ -19,154 +13,83 @@ const stateFile = path.join(tempRoot, 'permissions.json');
 let now = Date.parse('2026-09-24T00:00:00.000Z');
 const audit = [];
 
+function permissionHash(permissionId) {
+  return crypto.createHash('sha256').update(permissionId).digest('hex');
+}
+
+function writeGrant(permissionId, {
+  deviceId = 'device-a',
+  issuedAt = now,
+  expiresAt = issuedAt + (6 * 60 * 60 * 1000),
+  revokedAt = null,
+  expiredAt = null,
+} = {}) {
+  fs.writeFileSync(stateFile, JSON.stringify({
+    version: 1,
+    grants: [{
+      permissionHash: permissionHash(permissionId),
+      deviceId,
+      issuedAt,
+      expiresAt,
+      revokedAt,
+      expiredAt,
+    }],
+  }, null, 2) + '\n', 'utf8');
+}
+
 try {
+  const permissionId = 'wcm_perm_existing_test_capability';
+  writeGrant(permissionId);
   const manager = new TemporaryPermissionManager({
     stateFile,
     now: () => now,
     audit: (event) => audit.push(event),
   });
 
-  assert.equal(TEMP_PERMISSION_DEFAULT_SECONDS, 21600);
-  const prepared = manager.request({
-    deviceId: 'device-a',
-    justification: 'Test temporary access.',
-    hostSession: 'host-session-a',
-  });
-  assert.equal(prepared.request.state, 'pending');
-  assert.equal(prepared.request.device_id, 'device-a');
-  assert.equal(prepared.request.requested_duration_seconds, 21600);
-  assert.ok(prepared.request.approval_id);
-  assert.ok(prepared.request.operation_id);
-  assert.match(prepared.request.intent_sha256, /^[a-f0-9]{64}$/);
-  assert.ok(prepared.approvalNonce);
-  assert.throws(() => manager.resolve({
-    approvalId: prepared.request.approval_id,
-    approvalNonce: 'wrong',
-    decision: 'approve',
-    hostSession: 'host-session-a',
-  }), /Invalid approval token/);
-  assert.throws(() => manager.resolve({
-    approvalId: prepared.request.approval_id,
-    approvalNonce: prepared.approvalNonce,
-    decision: 'approve',
-    hostSession: 'host-session-b',
-  }), /different host session/);
+  assert.equal(typeof manager.request, 'undefined');
+  assert.equal(typeof manager.resolve, 'undefined');
 
-  now += 60_000;
-  const approved = manager.resolve({
-    approvalId: prepared.request.approval_id,
-    approvalNonce: prepared.approvalNonce,
-    decision: 'approve',
-    hostSession: 'host-session-a',
-  });
-  assert.equal(approved.state, 'consumed');
-  assert.equal(approved.operation_id, prepared.request.operation_id);
-  assert.equal(approved.intent_sha256, prepared.request.intent_sha256);
-  assert.match(approved.permission_id, /^wcm_perm_/);
-  assert.equal(
-    Date.parse(approved.expires_at) - Date.parse(approved.issued_at),
-    6 * 60 * 60 * 1000,
-  );
-  assert.throws(() => manager.resolve({
-    approvalId: prepared.request.approval_id,
-    approvalNonce: prepared.approvalNonce,
-    decision: 'approve',
-    hostSession: 'host-session-a',
-  }), /state=consumed/);
-
-  const stateText = fs.readFileSync(stateFile, 'utf8');
-  assert.doesNotMatch(stateText, new RegExp(approved.permission_id));
-  assert.match(stateText, /permissionHash/);
-
-  const active = manager.validate({
-    permissionId: approved.permission_id,
-    deviceId: 'device-a',
-  });
+  const active = manager.validate({ permissionId, deviceId: 'device-a' });
   assert.equal(active.ok, true);
   assert.equal(active.state, 'active');
-  assert.equal(manager.validate({
-    permissionId: approved.permission_id,
-    deviceId: 'device-b',
-  }).ok, false);
+  assert.equal(manager.validate({ permissionId, deviceId: 'device-b' }).ok, false);
 
-  const reloaded = new TemporaryPermissionManager({
-    stateFile,
-    now: () => now,
-  });
-  assert.equal(reloaded.validate({
-    permissionId: approved.permission_id,
-    deviceId: 'device-a',
-  }).ok, true);
+  const stateText = fs.readFileSync(stateFile, 'utf8');
+  assert.doesNotMatch(stateText, new RegExp(permissionId));
+  assert.match(stateText, /permissionHash/);
 
-  now = Date.parse(approved.expires_at) - 1;
-  assert.equal(reloaded.validate({
-    permissionId: approved.permission_id,
-    deviceId: 'device-a',
-  }).ok, true);
-  now += 1;
-  const expired = reloaded.validate({
-    permissionId: approved.permission_id,
-    deviceId: 'device-a',
-  });
+  const reloaded = new TemporaryPermissionManager({ stateFile, now: () => now });
+  assert.equal(reloaded.validate({ permissionId, deviceId: 'device-a' }).ok, true);
+
+  now += 6 * 60 * 60 * 1000;
+  const expired = reloaded.validate({ permissionId, deviceId: 'device-a' });
   assert.equal(expired.ok, false);
   assert.equal(expired.state, 'expired');
 
-  now = Date.parse('2026-09-24T07:00:00.000Z');
-  const second = manager.request({ deviceId: 'device-a' });
-  const secondApproved = manager.resolve({
-    approvalId: second.request.approval_id,
-    approvalNonce: second.approvalNonce,
-    decision: 'approve',
-  });
-  assert.equal(manager.revoke({
-    permissionId: secondApproved.permission_id,
+  now = Date.parse('2026-09-24T08:00:00.000Z');
+  const revocable = 'wcm_perm_existing_revocable';
+  writeGrant(revocable);
+  const revokeManager = new TemporaryPermissionManager({ stateFile, now: () => now });
+  assert.equal(revokeManager.revoke({
+    permissionId: revocable,
     deviceId: 'device-a',
   }).state, 'revoked');
-  const revokedStatus = manager.validate({
-    permissionId: secondApproved.permission_id,
-    deviceId: 'device-a',
-  });
-  assert.equal(revokedStatus.ok, false);
-  assert.equal(revokedStatus.state, 'revoked');
-  assert.equal(manager.status({
-    permissionId: secondApproved.permission_id,
+  assert.equal(revokeManager.status({
+    permissionId: revocable,
     deviceId: 'device-a',
   }).state, 'revoked');
-
-  const denied = manager.request({ deviceId: 'device-a' });
-  assert.equal(manager.resolve({
-    approvalId: denied.request.approval_id,
-    approvalNonce: denied.approvalNonce,
-    decision: 'deny',
-  }).state, 'denied');
-
-  const expiring = manager.request({ deviceId: 'device-a' });
-  now = Date.parse(expiring.request.approval_expires_at);
-  assert.throws(() => manager.resolve({
-    approvalId: expiring.request.approval_id,
-    approvalNonce: expiring.approvalNonce,
-    decision: 'approve',
-  }), /Unknown or expired approval_id/);
 
   fs.writeFileSync(stateFile, '{not-json', 'utf8');
   const failClosed = new TemporaryPermissionManager({ stateFile, now: () => now });
   assert.equal(failClosed.validate({
-    permissionId: secondApproved.permission_id,
+    permissionId: revocable,
     deviceId: 'device-a',
   }).ok, false);
 
-  assert.equal(TEMP_PERMISSION_UI_URI, 'ui://wcm/temporary-permission-v2.html');
-  assert.match(TEMP_PERMISSION_UI_HTML, /Approve for/);
-  assert.match(TEMP_PERMISSION_UI_HTML, /approval_nonce/);
-  assert.match(TEMP_PERMISSION_UI_HTML, /resolve_temporary_permission/);
-  assert.match(TEMP_PERMISSION_UI_HTML, /approved_retryable/);
-  assert.match(TEMP_PERMISSION_UI_HTML, /execution_unknown/);
-  assert.match(TEMP_PERMISSION_UI_HTML, /ui\/update-model-context/);
-  assert.ok(audit.some((event) => event.event === 'permission_requested'));
-  assert.ok(audit.some((event) => event.event === 'permission_approved'));
-  assert.ok(audit.every((event) => !JSON.stringify(event).includes('wcm_perm_')));
+  assert.ok(audit.some((event) => event.event === 'permission_used'));
+  assert.ok(audit.every((event) => !JSON.stringify(event).includes(permissionId)));
 
-  console.log('WCM temporary permission tests: PASS');
+  console.log('WCM temporary permission validation tests: PASS');
 } finally {
   fs.rmSync(tempRoot, { recursive: true, force: true });
 }

@@ -188,16 +188,27 @@ async function runRound(round, approvalSecret) {
       throw new Error('Routed tool does not require deviceId + permissionId: ' + name);
     }
   }
-  const permissionRequestTool = toolList.find((tool) => tool.name === 'request_temporary_permission');
-  if (permissionRequestTool?._meta?.['openai/outputTemplate'] !==
-      'ui://wcm/temporary-permission-v2.html') {
-    throw new Error('Temporary permission tool did not expose the WCM approval card.');
+  const approvalTestExecTool = toolList.find((tool) => tool.name === 'approval_test_exec');
+  const requestApprovalTestTool = toolList.find((tool) => tool.name === 'request_approval_test');
+  const resolveApprovalTestTool = toolList.find((tool) => tool.name === 'resolve_approval_test');
+  if (!approvalTestExecTool || !requestApprovalTestTool || !resolveApprovalTestTool) {
+    throw new Error('Approval test tools were not listed.');
+  }
+  if (approvalTestExecTool._meta) {
+    throw new Error('approval_test_exec must not expose approval-card metadata.');
+  }
+  if (requestApprovalTestTool?._meta?.['openai/outputTemplate'] !==
+      'ui://wcm/approval-test-v1.html') {
+    throw new Error('request_approval_test did not expose the WCM approval test card.');
+  }
+  if (resolveApprovalTestTool?._meta?.ui?.visibility?.join(',') !== 'app') {
+    throw new Error('resolve_approval_test is not app-only.');
   }
   const screenshotTool = { name: 'not-applicable' };
-  const safeToolName = 'get_config';
+  const safeToolName = 'approval_test_exec';
 
   const filePreviewUri = 'ui://desktop-commander/file-preview';
-  const permissionUiUri = 'ui://wcm/temporary-permission-v2.html';
+  const approvalTestUiUri = 'ui://wcm/approval-test-v1.html';
   stage = stagePrefix + 'resources/list through upstream';
   const resourcesResponse = await request('/rdc/mcp', {
     method: 'POST',
@@ -209,8 +220,8 @@ async function runRound(round, approvalSecret) {
   if (!Array.isArray(resources) || !resources.some((item) => item?.uri === filePreviewUri)) {
     throw new Error('Legacy resources/list did not include file preview UI.');
   }
-  if (!resources.some((item) => item?.uri === permissionUiUri)) {
-    throw new Error('Legacy resources/list did not include WCM temporary permission UI.');
+  if (!resources.some((item) => item?.uri === approvalTestUiUri)) {
+    throw new Error('Legacy resources/list did not include WCM approval test UI.');
   }
 
   stage = stagePrefix + 'resources/read through upstream';
@@ -244,8 +255,8 @@ async function runRound(round, approvalSecret) {
   const targetDeviceId = deviceInfo?.defaultDeviceId || deviceInfo?.devices?.find((item) => item?.online)?.deviceId;
   if (!targetDeviceId) throw new Error('No online/default device was available.');
 
-  stage = stagePrefix + 'temporary permission request';
-  const permissionRequest = await request('/rdc/mcp', {
+  stage = stagePrefix + 'approval test freeze';
+  const approvalTestRequest = await request('/rdc/mcp', {
     method: 'POST',
     headers: { ...mcpHeaders, 'Mcp-Session-Id': sessionId },
     body: JSON.stringify({
@@ -253,24 +264,27 @@ async function runRound(round, approvalSecret) {
       id: round * 100 + 7,
       method: 'tools/call',
       params: {
-        name: 'request_temporary_permission',
+        name: 'approval_test_exec',
         arguments: {
           deviceId: targetDeviceId,
-          justification: 'RDC legacy E2E temporary permission.',
+          command: 'echo WCM_APPROVAL_TEST_OK',
+          justification: 'RDC legacy E2E approval test.',
         },
       },
     }),
   });
-  requireStatus(permissionRequest, 200);
-  const permissionRequestResult = parseSse(permissionRequest.text).result;
-  const approvalId = permissionRequestResult?.structuredContent?.approval_id;
-  const approvalNonce = permissionRequestResult?._meta?.approval_nonce;
-  if (!approvalId || !approvalNonce) {
-    throw new Error('Temporary permission request did not return approval details.');
+  requireStatus(approvalTestRequest, 200);
+  const approvalTestRequestResult = parseSse(approvalTestRequest.text).result;
+  const approvalId = approvalTestRequestResult?.structuredContent?.approval_id;
+  if (!approvalId || approvalTestRequestResult?.structuredContent?.approval_required !== true) {
+    throw new Error('approval_test_exec did not return a frozen pending action.');
+  }
+  if (approvalTestRequestResult?._meta?.approval_nonce) {
+    throw new Error('approval_test_exec generated a nonce before card presentation.');
   }
 
-  stage = stagePrefix + 'temporary permission approval';
-  const permissionApproval = await request('/rdc/mcp', {
+  stage = stagePrefix + 'approval test card';
+  const approvalCard = await request('/rdc/mcp', {
     method: 'POST',
     headers: { ...mcpHeaders, 'Mcp-Session-Id': sessionId },
     body: JSON.stringify({
@@ -278,22 +292,21 @@ async function runRound(round, approvalSecret) {
       id: round * 100 + 8,
       method: 'tools/call',
       params: {
-        name: 'resolve_temporary_permission',
-        arguments: {
-          approval_id: approvalId,
-          approval_nonce: approvalNonce,
-          decision: 'approve',
-        },
+        name: 'request_approval_test',
+        arguments: { approval_id: approvalId },
+        _meta: { 'openai/session': 'wcm-legacy-e2e-session' },
       },
     }),
   });
-  requireStatus(permissionApproval, 200);
-  const permissionApprovalResult = parseSse(permissionApproval.text).result;
-  const permissionId = permissionApprovalResult?.structuredContent?.permission_id;
-  if (!permissionId) throw new Error('Temporary permission approval did not issue permission_id.');
+  requireStatus(approvalCard, 200);
+  const approvalCardResult = parseSse(approvalCard.text).result;
+  const approvalNonce = approvalCardResult?._meta?.approval_nonce;
+  if (!approvalNonce || approvalCardResult?.structuredContent?.approval_id !== approvalId) {
+    throw new Error('request_approval_test did not bind the frozen action to a card.');
+  }
 
-  stage = stagePrefix + 'read-only tool through upstream';
-  const safeTool = await request('/rdc/mcp', {
+  stage = stagePrefix + 'approval test execution';
+  const approvalExecution = await request('/rdc/mcp', {
     method: 'POST',
     headers: { ...mcpHeaders, 'Mcp-Session-Id': sessionId },
     body: JSON.stringify({
@@ -301,19 +314,25 @@ async function runRound(round, approvalSecret) {
       id: round * 10 + 3,
       method: 'tools/call',
       params: {
-        name: safeToolName,
-        arguments: { deviceId: targetDeviceId, permissionId },
+        name: 'resolve_approval_test',
+        arguments: {
+          approval_id: approvalId,
+          approval_nonce: approvalNonce,
+          decision: 'approve',
+        },
+        _meta: { 'openai/session': 'wcm-legacy-e2e-session' },
       },
     }),
   });
-  requireStatus(safeTool, 200);
-  const safeToolResult = parseSse(safeTool.text).result;
-  if (!safeToolResult || safeToolResult.isError === true) {
-    throw new Error('Read-only tool returned an error.');
+  requireStatus(approvalExecution, 200);
+  const approvalExecutionResult = parseSse(approvalExecution.text).result;
+  if (approvalExecutionResult?.structuredContent?.state !== 'consumed' ||
+      !String(approvalExecutionResult?.structuredContent?.output || '').includes('WCM_APPROVAL_TEST_OK')) {
+    throw new Error('Approval test did not execute the frozen command.');
   }
 
-  stage = stagePrefix + 'temporary permission revocation';
-  const permissionRevoke = await request('/rdc/mcp', {
+  stage = stagePrefix + 'ordinary permission boundary';
+  const ordinaryTool = await request('/rdc/mcp', {
     method: 'POST',
     headers: { ...mcpHeaders, 'Mcp-Session-Id': sessionId },
     body: JSON.stringify({
@@ -321,15 +340,16 @@ async function runRound(round, approvalSecret) {
       id: round * 100 + 9,
       method: 'tools/call',
       params: {
-        name: 'revoke_temporary_permission',
-        arguments: { deviceId: targetDeviceId, permissionId },
+        name: 'get_config',
+        arguments: { deviceId: targetDeviceId, permissionId: 'not-an-active-permission' },
       },
     }),
   });
-  requireStatus(permissionRevoke, 200);
-  const permissionRevokeResult = parseSse(permissionRevoke.text).result;
-  if (permissionRevokeResult?.structuredContent?.state !== 'revoked') {
-    throw new Error('Temporary permission could not be revoked.');
+  requireStatus(ordinaryTool, 200);
+  const ordinaryToolResult = parseSse(ordinaryTool.text).result;
+  if (ordinaryToolResult?.isError !== true ||
+      !JSON.stringify(ordinaryToolResult).includes('issuance is currently disabled')) {
+    throw new Error('Ordinary routed tool did not retain its existing permission boundary.');
   }
 
   stage = stagePrefix + 'MCP session cleanup';
@@ -391,7 +411,7 @@ async function main() {
   console.log('bearer_initialize_status=200');
   console.log('tools_count=' + roundTwo.toolCount);
   console.log('required_tools=get_config,read_file,start_process');
-  console.log('safe_tool=' + roundTwo.safeToolName + ' status=200');
+  console.log('approval_test_tool=' + roundTwo.safeToolName + ' status=200');
   console.log('revoke_status=200');
   console.log('revoked_bearer_status=401');
 }

@@ -133,9 +133,11 @@ async function runModern(approvalSecret) {
   if (!Array.isArray(tools) || tools.length < 20) throw new Error('tools/list returned too few tools.');
   const listDevicesTool = tools.find((tool) => tool?.name === 'list_devices');
   const getConfigTool = tools.find((tool) => tool?.name === 'get_config');
-  const requestPermissionTool = tools.find((tool) => tool?.name === 'request_temporary_permission');
-  const resolvePermissionTool = tools.find((tool) => tool?.name === 'resolve_temporary_permission');
-  if (!listDevicesTool || !getConfigTool || !requestPermissionTool || !resolvePermissionTool) {
+  const approvalTestExecTool = tools.find((tool) => tool?.name === 'approval_test_exec');
+  const requestApprovalTestTool = tools.find((tool) => tool?.name === 'request_approval_test');
+  const resolveApprovalTestTool = tools.find((tool) => tool?.name === 'resolve_approval_test');
+  if (!listDevicesTool || !getConfigTool || !approvalTestExecTool ||
+      !requestApprovalTestTool || !resolveApprovalTestTool) {
     throw new Error('required routed tools were not listed.');
   }
   if (!listDevicesTool.description?.includes('network connectivity can be transiently unstable')) {
@@ -147,15 +149,18 @@ async function runModern(approvalSecret) {
   if (!getConfigTool.inputSchema?.required?.includes('permissionId')) {
     throw new Error('get_config does not require permissionId.');
   }
-  if (requestPermissionTool._meta?.['openai/outputTemplate'] !== 'ui://wcm/temporary-permission-v2.html') {
-    throw new Error('request_temporary_permission did not expose the WCM approval card.');
+  if (approvalTestExecTool._meta) {
+    throw new Error('approval_test_exec must not expose approval-card metadata.');
   }
-  if (requestPermissionTool._meta?.ui?.visibility?.join(',') !== 'model,app') {
-    throw new Error('request_temporary_permission did not expose model+app visibility.');
+  if (requestApprovalTestTool._meta?.['openai/outputTemplate'] !== 'ui://wcm/approval-test-v1.html') {
+    throw new Error('request_approval_test did not expose the WCM approval test card.');
   }
-  if (resolvePermissionTool._meta?.ui?.visibility?.join(',') !== 'app' ||
-      resolvePermissionTool._meta?.['openai/widgetAccessible'] !== true) {
-    throw new Error('resolve_temporary_permission is not app-only.');
+  if (requestApprovalTestTool._meta?.ui?.visibility?.join(',') !== 'model,app') {
+    throw new Error('request_approval_test did not expose model+app visibility.');
+  }
+  if (resolveApprovalTestTool._meta?.ui?.visibility?.join(',') !== 'app' ||
+      resolveApprovalTestTool._meta?.['openai/widgetAccessible'] !== true) {
+    throw new Error('resolve_approval_test is not app-only.');
   }
   for (const name of ['read_file', 'edit_block']) {
     const tool = tools.find((candidate) => candidate?.name === name);
@@ -177,26 +182,38 @@ async function runModern(approvalSecret) {
   const targetDeviceId = deviceInfo?.defaultDeviceId || deviceInfo?.devices?.find((item) => item?.online)?.deviceId;
   if (!targetDeviceId) throw new Error('list_devices did not expose an online/default device.');
 
-  const permissionRequest = await mcp(accessToken, 4, 'tools/call', {
-    name: 'request_temporary_permission',
+  const frozenRequest = await mcp(accessToken, 4, 'tools/call', {
+    name: 'approval_test_exec',
     arguments: {
       deviceId: targetDeviceId,
-      justification: 'RDC modern E2E temporary permission.',
+      command: 'echo WCM_APPROVAL_TEST_OK',
+      justification: 'RDC modern E2E approval test.',
     },
+  });
+  const approvalId = frozenRequest?.structuredContent?.approval_id;
+  const operationId = frozenRequest?.structuredContent?.operation_id;
+  const intentSha256 = frozenRequest?.structuredContent?.intent_sha256;
+  if (!approvalId || !operationId || !intentSha256 ||
+      frozenRequest?.structuredContent?.approval_required !== true) {
+    throw new Error('approval_test_exec did not return a frozen pending action.');
+  }
+  if (frozenRequest?._meta?.approval_nonce) {
+    throw new Error('approval_test_exec generated an approval nonce before card presentation.');
+  }
+  const cardRequest = await mcp(accessToken, 5, 'tools/call', {
+    name: 'request_approval_test',
+    arguments: { approval_id: approvalId },
     _meta: { 'openai/session': 'wcm-modern-e2e-session' },
   });
-  const approvalId = permissionRequest?.structuredContent?.approval_id;
-  const operationId = permissionRequest?.structuredContent?.operation_id;
-  const intentSha256 = permissionRequest?.structuredContent?.intent_sha256;
-  const approvalNonce = permissionRequest?._meta?.approval_nonce;
-  if (!approvalId || !operationId || !intentSha256 || !approvalNonce) {
-    throw new Error('temporary permission request did not return approval details.');
+  const approvalNonce = cardRequest?._meta?.approval_nonce;
+  if (!approvalNonce || cardRequest?.structuredContent?.approval_id !== approvalId) {
+    throw new Error('request_approval_test did not bind the frozen action to an approval card.');
   }
-  if (Object.hasOwn(permissionRequest?.structuredContent || {}, 'approval_nonce')) {
-    throw new Error('temporary permission request leaked approval_nonce into structuredContent.');
+  if (Object.hasOwn(cardRequest?.structuredContent || {}, 'approval_nonce')) {
+    throw new Error('request_approval_test leaked approval_nonce into structuredContent.');
   }
-  const wrongSessionApproval = await mcp(accessToken, 5, 'tools/call', {
-    name: 'resolve_temporary_permission',
+  const wrongSessionApproval = await mcp(accessToken, 6, 'tools/call', {
+    name: 'resolve_approval_test',
     arguments: {
       approval_id: approvalId,
       approval_nonce: approvalNonce,
@@ -206,10 +223,10 @@ async function runModern(approvalSecret) {
   });
   if (wrongSessionApproval?.isError !== true ||
       !JSON.stringify(wrongSessionApproval).includes('different host session')) {
-    throw new Error('temporary permission approval was not bound to the host session.');
+    throw new Error('approval test was not bound to the host session.');
   }
-  const permissionApproval = await mcp(accessToken, 5, 'tools/call', {
-    name: 'resolve_temporary_permission',
+  const approvalResult = await mcp(accessToken, 7, 'tools/call', {
+    name: 'resolve_approval_test',
     arguments: {
       approval_id: approvalId,
       approval_nonce: approvalNonce,
@@ -217,57 +234,50 @@ async function runModern(approvalSecret) {
     },
     _meta: { 'openai/session': 'wcm-modern-e2e-session' },
   });
-  const permissionId = permissionApproval?.structuredContent?.permission_id;
-  if (!permissionId) throw new Error('temporary permission approval did not issue permission_id.');
-  if (permissionApproval?.structuredContent?.state !== 'consumed' ||
-      permissionApproval?.structuredContent?.operation_id !== operationId ||
-      permissionApproval?.structuredContent?.intent_sha256 !== intentSha256) {
-    throw new Error('temporary permission approval did not consume the frozen operation.');
+  if (approvalResult?.structuredContent?.state !== 'consumed' ||
+      approvalResult?.structuredContent?.operation_id !== operationId ||
+      approvalResult?.structuredContent?.intent_sha256 !== intentSha256 ||
+      !String(approvalResult?.structuredContent?.output || '').includes('WCM_APPROVAL_TEST_OK')) {
+    throw new Error('approval test did not execute and consume the frozen command.');
   }
 
-  const targetConfig = await mcp(accessToken, 6, 'tools/call', {
+  const targetConfig = await mcp(accessToken, 8, 'tools/call', {
     name: 'get_config',
-    arguments: { deviceId: targetDeviceId, permissionId },
+    arguments: { deviceId: targetDeviceId, permissionId: 'not-an-active-permission' },
   });
-  if (targetConfig?.isError === true || !Array.isArray(targetConfig?.content)) {
-    throw new Error(`get_config(deviceId=${targetDeviceId}) failed.`);
+  if (targetConfig?.isError !== true ||
+      !JSON.stringify(targetConfig).includes('issuance is currently disabled')) {
+    throw new Error('ordinary routed tool did not retain its existing permission boundary.');
   }
 
-  const resourcesResult = await mcp(accessToken, 7, 'resources/list', {});
+  const resourcesResult = await mcp(accessToken, 9, 'resources/list', {});
   const resources = resourcesResult?.resources;
   const filePreviewUri = 'ui://desktop-commander/file-preview';
-  const permissionUiUri = 'ui://wcm/temporary-permission-v2.html';
+  const approvalTestUiUri = 'ui://wcm/approval-test-v1.html';
   if (!Array.isArray(resources) || !resources.some((item) => item?.uri === filePreviewUri)) {
     throw new Error('resources/list did not include file preview UI.');
   }
-  if (!resources.some((item) => item?.uri === permissionUiUri)) {
-    throw new Error('resources/list did not include WCM temporary permission UI.');
+  if (!resources.some((item) => item?.uri === approvalTestUiUri)) {
+    throw new Error('resources/list did not include WCM approval test UI.');
   }
-  const resourceRead = await mcp(accessToken, 8, 'resources/read', { uri: filePreviewUri });
+  const resourceRead = await mcp(accessToken, 10, 'resources/read', { uri: filePreviewUri });
   const html = resourceRead?.contents?.[0]?.text || '';
   if (!html.includes('<html') && !html.includes('<!DOCTYPE html')) {
     throw new Error('resources/read did not return the file preview HTML.');
   }
-  const permissionUi = await mcp(accessToken, 9, 'resources/read', { uri: permissionUiUri });
-  const permissionHtml = permissionUi?.contents?.[0]?.text || '';
-  if (!permissionHtml.includes('WCM temporary permission')) {
-    throw new Error('resources/read did not return WCM temporary permission HTML.');
+  const approvalTestUi = await mcp(accessToken, 11, 'resources/read', { uri: approvalTestUiUri });
+  const approvalTestHtml = approvalTestUi?.contents?.[0]?.text || '';
+  if (!approvalTestHtml.includes('WCM approval test')) {
+    throw new Error('resources/read did not return WCM approval test HTML.');
   }
-  if (permissionUi?.contents?.[0]?._meta?.ui?.prefersBorder !== true) {
-    throw new Error('WCM temporary permission resource did not expose MCP App UI metadata.');
+  if (approvalTestUi?.contents?.[0]?._meta?.ui?.prefersBorder !== true) {
+    throw new Error('WCM approval test resource did not expose MCP App UI metadata.');
   }
-  const templates = await mcp(accessToken, 10, 'resources/templates/list', {});
+  const templates = await mcp(accessToken, 12, 'resources/templates/list', {});
   if (!Array.isArray(templates?.resourceTemplates)) {
     throw new Error('resources/templates/list did not return an array.');
   }
 
-  const permissionRevoke = await mcp(accessToken, 11, 'tools/call', {
-    name: 'revoke_temporary_permission',
-    arguments: { deviceId: targetDeviceId, permissionId },
-  });
-  if (permissionRevoke?.structuredContent?.state !== 'revoked') {
-    throw new Error('temporary permission could not be revoked.');
-  }
   stage = 'revocation';
   const revoke = await request('/rdc/revoke', {
     method: 'POST',
@@ -292,7 +302,8 @@ async function main() {
   console.log('server_discover=PASS');
   console.log('tools_count=' + result.toolCount);
   console.log('list_devices=PASS');
-  console.log('target_get_config=PASS');
+  console.log('approval_test_exec=PASS');
+  console.log('ordinary_permission_boundary=PASS');
   console.log('resources_list=PASS');
   console.log('resources_read=PASS');
   console.log('resource_templates_list=PASS');

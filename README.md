@@ -56,22 +56,16 @@ See [`worker/README.md`](worker/README.md) for the dedicated Docker worker insta
 
 The router adds `list_devices` and requires both `deviceId` and a matching temporary `permissionId` on every Desktop Commander worker tool. Example targets are `local-pc` and `remote-worker`.
 
-Temporary permissions are approved explicitly in the WCM approval card and are bound to one device. The normal flow is:
+New temporary-permission issuance is currently disabled. Existing active permissions remain device-bound, can be checked with `temporary_permission_status`, can be invalidated with `revoke_temporary_permission`, and continue to be validated against `.state/wcm-temporary-permissions.json`. Only SHA-256 hashes are persisted; plaintext `permissionId` values are never written to that state file or router audit log.
 
-1. Call `list_devices` to identify the target.
-2. Call `request_temporary_permission` with that `deviceId`.
-3. The user approves or denies the request in the WCM approval card.
-4. Approval returns a new `permissionId`. Use it only with the same `deviceId`.
-5. The permission remains valid for at most six hours from the approval time. It is not automatically renewed.
-6. Call `revoke_temporary_permission` to invalidate it early, or request a new permission after expiry.
+The current approval work is isolated behind one test-only execution path:
 
-`list_devices`, `request_temporary_permission`, `temporary_permission_status`, and `revoke_temporary_permission` are router-owned and do not themselves require a temporary permission. The approval resolver is also router-owned but is advertised as an MCP-App-only action rather than a model-facing approval path. The public `approval_id` is not an execution credential: approval also requires a hidden per-request nonce supplied only in the tool-result `_meta` for the approval App, and the actual `permissionId` is generated only after the App resolves the frozen request.
+1. Call `approval_test_exec` with an exact `deviceId` and command. WCM freezes the action and returns `approval_required=true` without executing it.
+2. Call `request_approval_test` with only the returned `approval_id`. This presents the MCP App card, generates the hidden one-time nonce, and binds the request to the host session when available.
+3. The card calls the app-only `resolve_approval_test` tool. Approve dispatches only the frozen command to the target worker through `start_process`; Deny does not dispatch it.
+4. The App writes the terminal result into model context and asks ChatGPT to continue without reconstructing the command.
 
-Each approval request also receives an `operation_id` and `intent_sha256`. The router freezes the exact device, grant duration, and permission scope when the request is created. The approval App may submit only the `approval_id`, hidden nonce, and decision; it cannot replace the frozen target. When the host supplies `openai/session`, the request is bound to that host session and a different session cannot consume it. Successful approval moves the request through `dispatching` to `consumed`; a failure before permission issuance may remain `approved_retryable`, while an indeterminate post-dispatch outcome is never retried automatically. The approval App writes the terminal result back with `ui/update-model-context` and asks ChatGPT to continue without recreating the approval action.
-
-Approved permission state is stored under `.state/wcm-temporary-permissions.json` so a router restart does not silently revoke a still-valid six-hour grant. Only a SHA-256 hash of the bearer capability is persisted; the plaintext `permissionId` is never written to that state file or router audit log. Pending approval requests are memory-only and expire after 15 minutes by default.
-
-The supervisor reads `WC_TEMP_PERMISSION_TTL_SECONDS` and `WC_PERMISSION_APPROVAL_TTL_SECONDS` from `config/rdc.env` when present. Defaults are 21600 seconds (six hours) and 900 seconds (15 minutes), respectively. The router caps active permission TTL at six hours even if a larger value is configured.
+This test approval path does not issue a `permissionId` and does not alter the access rules of ordinary Desktop Commander tools.
 
 The router also advertises bundled specialized capabilities in MCP discovery, `list_devices`, and `start_process` descriptions so an LLM can discover them without pretending that each helper is a standalone MCP action. The current catalog contains two capabilities: Bilibili download under `tools/bilibili-download` (including its bridge and bundled `yt-dlp.exe` fallback) and Quark transfer under `tools/quark-transfer`. Their READMEs remain the source of truth for invocation details and authentication requirements.
 

@@ -10,7 +10,7 @@
   },
   "scripts": {
     "postinstall": "node scripts/apply-desktop-commander-image-guard.mjs",
-    "test": "node scripts/test-temporary-permissions.mjs && node scripts/test-router-temporary-permission-contract.mjs && node scripts/test-self-contained.mjs",
+    "test": "node scripts/test-temporary-permissions.mjs && node scripts/test-approval-test.mjs && node scripts/test-router-temporary-permission-contract.mjs && node scripts/test-self-contained.mjs",
     "test:live": "node scripts/test-rdc-e2e.mjs && node scripts/test-rdc-modern-e2e.mjs && node scripts/test-rpc-concurrency.mjs",
     "test:all": "npm test && npm run test:live",
     "test:legacy": "node scripts/test-rdc-e2e.mjs",

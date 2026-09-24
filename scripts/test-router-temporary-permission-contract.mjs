@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict';
 import {
-  TEMP_PERMISSION_UI_URI,
-  localTemporaryPermissionResource,
-  mergeTemporaryPermissionResourceList,
   stripTemporaryPermissionRoutingArguments,
   temporaryPermissionRouterTools,
   withTemporaryPermissionRoutingSchema,
 } from '../router/temporary-permission-routing.mjs';
+import {
+  APPROVAL_TEST_UI_URI,
+  approvalTestRouterTools,
+  localApprovalTestResource,
+  mergeApprovalTestResourceList,
+} from '../router/approval-test-routing.mjs';
 
 const deviceSchema = {
   type: 'string',
@@ -19,32 +22,15 @@ const routedSchema = withTemporaryPermissionRoutingSchema({
   properties: { value: { type: 'string' } },
   required: ['value'],
 }, deviceSchema);
-assert.deepEqual(
-  routedSchema.required.sort(),
-  ['deviceId', 'permissionId', 'value'].sort(),
-);
+assert.deepEqual(routedSchema.required.sort(), ['deviceId', 'permissionId', 'value'].sort());
 assert.deepEqual(routedSchema.properties.deviceId.enum, ['device-a', 'device-b']);
 assert.equal(routedSchema.properties.permissionId.type, 'string');
 
-const routerTools = temporaryPermissionRouterTools(deviceSchema);
-const requestTool = routerTools.find((tool) => tool.name === 'request_temporary_permission');
-const resolveTool = routerTools.find((tool) => tool.name === 'resolve_temporary_permission');
-const statusTool = routerTools.find((tool) => tool.name === 'temporary_permission_status');
-const revokeTool = routerTools.find((tool) => tool.name === 'revoke_temporary_permission');
-assert.ok(requestTool && resolveTool && statusTool && revokeTool);
-assert.deepEqual(requestTool.inputSchema.required, ['deviceId']);
-assert.equal(requestTool._meta?.['openai/outputTemplate'], TEMP_PERMISSION_UI_URI);
-assert.equal(requestTool._meta?.['openai/widgetAccessible'], true);
-assert.deepEqual(requestTool._meta?.ui?.visibility, ['model', 'app']);
-assert.ok(requestTool.outputSchema?.properties?.operation_id);
-assert.ok(resolveTool.inputSchema.required.includes('approval_nonce'));
-assert.deepEqual(resolveTool._meta?.ui?.visibility, ['app']);
-assert.equal(resolveTool._meta?.['openai/widgetAccessible'], true);
-assert.equal(resolveTool.inputSchema.properties.approval_id.format, 'uuid');
-assert.equal(resolveTool.inputSchema.properties.approval_nonce.minLength, 20);
-assert.ok(resolveTool.outputSchema?.properties?.permission_id);
-assert.deepEqual(statusTool.inputSchema.required.sort(), ['deviceId', 'permissionId'].sort());
-assert.deepEqual(revokeTool.inputSchema.required.sort(), ['deviceId', 'permissionId'].sort());
+const permissionTools = temporaryPermissionRouterTools(deviceSchema);
+assert.deepEqual(permissionTools.map((tool) => tool.name).sort(), [
+  'revoke_temporary_permission',
+  'temporary_permission_status',
+]);
 
 const stripped = stripTemporaryPermissionRoutingArguments({
   deviceId: 'device-a',
@@ -53,7 +39,23 @@ const stripped = stripTemporaryPermissionRoutingArguments({
 });
 assert.deepEqual(stripped, { value: 'forward-me' });
 
-const merged = mergeTemporaryPermissionResourceList({
+const approvalTools = approvalTestRouterTools(deviceSchema);
+const testExec = approvalTools.find((tool) => tool.name === 'approval_test_exec');
+const requestCard = approvalTools.find((tool) => tool.name === 'request_approval_test');
+const resolver = approvalTools.find((tool) => tool.name === 'resolve_approval_test');
+assert.ok(testExec && requestCard && resolver);
+assert.equal(testExec._meta, undefined);
+assert.deepEqual(testExec.inputSchema.required, ['deviceId', 'command']);
+assert.deepEqual(requestCard.inputSchema.required, ['approval_id']);
+assert.equal(requestCard._meta?.['openai/outputTemplate'], APPROVAL_TEST_UI_URI);
+assert.equal(requestCard._meta?.['openai/widgetAccessible'], true);
+assert.deepEqual(requestCard._meta?.ui?.visibility, ['model', 'app']);
+assert.deepEqual(resolver._meta?.ui?.visibility, ['app']);
+assert.equal(resolver._meta?.['openai/widgetAccessible'], true);
+assert.equal(resolver.inputSchema.properties.approval_id.format, 'uuid');
+assert.equal(resolver.inputSchema.properties.approval_nonce.minLength, 20);
+
+const merged = mergeApprovalTestResourceList({
   result: {
     resources: [{
       uri: 'ui://worker/existing',
@@ -63,33 +65,21 @@ const merged = mergeTemporaryPermissionResourceList({
   },
 });
 assert.ok(merged.result.resources.some((resource) => resource.uri === 'ui://worker/existing'));
-assert.ok(merged.result.resources.some((resource) => resource.uri === TEMP_PERMISSION_UI_URI));
 assert.equal(
-  merged.result.resources.filter((resource) =>
-    typeof resource?.uri === 'string' && resource.uri.startsWith('ui://wcm/temporary-permission-')
-  ).length,
-  1,
-);
-assert.equal(
-  merged.result.resources.filter((resource) => resource.uri === TEMP_PERMISSION_UI_URI).length,
-  1,
-);
-const mergedAgain = mergeTemporaryPermissionResourceList(merged);
-assert.equal(
-  mergedAgain.result.resources.filter((resource) => resource.uri === TEMP_PERMISSION_UI_URI).length,
+  merged.result.resources.filter((resource) => resource.uri === APPROVAL_TEST_UI_URI).length,
   1,
 );
 
-const localResource = localTemporaryPermissionResource({
+const localResource = localApprovalTestResource({
   method: 'resources/read',
-  params: { uri: TEMP_PERMISSION_UI_URI },
+  params: { uri: APPROVAL_TEST_UI_URI },
 });
 assert.equal(localResource?.result?.contents?.[0]?.mimeType, 'text/html;profile=mcp-app');
-assert.match(localResource?.result?.contents?.[0]?.text || '', /WCM temporary permission/);
+assert.match(localResource?.result?.contents?.[0]?.text || '', /WCM approval test/);
 assert.equal(localResource?.result?.contents?.[0]?._meta?.ui?.prefersBorder, true);
-assert.equal(localTemporaryPermissionResource({
+assert.equal(localApprovalTestResource({
   method: 'resources/read',
   params: { uri: 'ui://worker/existing' },
 }), null);
 
-console.log('WCM router temporary permission contract: PASS');
+console.log('WCM router permission/test-approval contract: PASS');

@@ -12,17 +12,18 @@ import {
 import { guardRouterToolResult, resolveMaxRouterToolResultBytes } from './response-guard.mjs';
 import { ConnectionScopedToolListCache } from './tool-list-cache.mjs';
 import { routerClientInfo, serverInfo } from './server-info.mjs';
+import { TemporaryPermissionManager } from './temporary-permissions.mjs';
 import {
-  TemporaryPermissionManager,
-  TEMP_PERMISSION_DEFAULT_SECONDS,
-} from './temporary-permissions.mjs';
-import {
-  localTemporaryPermissionResource,
-  mergeTemporaryPermissionResourceList,
   stripTemporaryPermissionRoutingArguments,
   temporaryPermissionRouterTools,
   withTemporaryPermissionRoutingSchema,
 } from './temporary-permission-routing.mjs';
+import { ApprovalTestManager } from './approval-test-manager.mjs';
+import {
+  approvalTestRouterTools,
+  localApprovalTestResource,
+  mergeApprovalTestResourceList,
+} from './approval-test-routing.mjs';
 
 const ROUTER_HOST = process.env.WC_ROUTER_HOST || '127.0.0.1';
 const ROUTER_PORT = Number(process.env.WC_ROUTER_PORT || 18009);
@@ -57,23 +58,11 @@ const routerLogger = {
   log: (...values) => appendRouterTrace('INFO', values.map(String).join(' ')),
   error: (...values) => appendRouterTrace('ERROR', values.map(String).join(' ')),
 };
-function boundedSeconds(value, fallback, maximum) {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
-  return Math.min(parsed, maximum);
-}
 const permissionManager = new TemporaryPermissionManager({
   stateFile: TEMP_PERMISSION_STATE_FILE,
-  grantTtlMs: boundedSeconds(
-    process.env.WC_TEMP_PERMISSION_TTL_SECONDS,
-    TEMP_PERMISSION_DEFAULT_SECONDS,
-    TEMP_PERMISSION_DEFAULT_SECONDS,
-  ) * 1000,
-  approvalTtlMs: boundedSeconds(
-    process.env.WC_PERMISSION_APPROVAL_TTL_SECONDS,
-    15 * 60,
-    60 * 60,
-  ) * 1000,
+  audit: (event) => appendRouterTrace('AUDIT', JSON.stringify(event)),
+});
+const approvalTestManager = new ApprovalTestManager({
   audit: (event) => appendRouterTrace('AUDIT', JSON.stringify(event)),
 });
 const hub = new WorkerHub({
@@ -283,6 +272,7 @@ function augmentTools(tools) {
       description: `List Windows Console devices and their online status.\n\n${SPECIALIZED_CAPABILITIES}\n\n${WCM_ERROR_SEMANTICS}`,
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     },
+    ...approvalTestRouterTools(toolDeviceSchema()),
     ...temporaryPermissionRouterTools(toolDeviceSchema()),
     ...plainAliases,
     ...routed,
@@ -303,6 +293,51 @@ function structuredToolResult(data, { isError = false, meta = null, context = {}
     ...(meta ? { _meta: meta } : {}),
     ...(isError ? { isError: true } : {}),
   }, context);
+}
+
+function approvalTestPendingResult(value) {
+  return classifyToolResult({
+    content: [{
+      type: 'text',
+      text: [
+        'WCM froze a test command for approval.',
+        'Approval ID: ' + value.approval_id,
+        'Operation ID: ' + value.operation_id,
+        'Device: ' + value.device_id,
+        'Command: ' + value.command,
+        'Expires: ' + value.expires_at,
+        'Call request_approval_test with this approval_id to render the approval card. Do not run the command yourself.',
+      ].join('\n'),
+    }],
+    structuredContent: value,
+  });
+}
+
+function approvalTestCardResult(prepared) {
+  const value = {
+    ...prepared.request,
+    output: 'Waiting for the user to approve or deny this frozen WCM test command.',
+  };
+  return classifyToolResult({
+    content: [{
+      type: 'text',
+      text: [
+        'WCM prepared a frozen test command for user approval.',
+        'Approval ID: ' + value.approval_id,
+        'Operation ID: ' + value.operation_id,
+        'Device: ' + value.device_id,
+        'Command: ' + value.command,
+        'Expires: ' + value.expires_at,
+        'The attached WCM approval test card is the only valid approval path for this request.',
+        'Do not recreate or run this command yourself.',
+      ].join('\n'),
+    }],
+    structuredContent: value,
+    _meta: {
+      source: 'wcm.approval-test',
+      approval_nonce: prepared.approvalNonce,
+    },
+  });
 }
 
 function enforceToolResultSize(result, payload) {
@@ -349,12 +384,12 @@ async function forwardDefaultResource(payload, sourcePayload = null) {
 
 async function routeResource(payload, sourcePayload = null) {
   const method = String(payload?.method || '');
-  const local = localTemporaryPermissionResource(payload);
+  const local = localApprovalTestResource(payload);
   if (local) return local;
   const message = await forwardDefaultResource(payload, sourcePayload);
   if (message?.error) return message;
   if (method !== 'resources/list') return message;
-  return mergeTemporaryPermissionResourceList(message);
+  return mergeApprovalTestResourceList(message);
 }
 
 function selectedToolDevice(payload) {
@@ -371,6 +406,19 @@ function hostSessionFor(payload, sourcePayload = null) {
   return source == null || source === '' ? null : String(source);
 }
 
+function workerToolText(result) {
+  const content = Array.isArray(result?.content) ? result.content : [];
+  return content
+    .filter((item) => item?.type === 'text' && typeof item.text === 'string')
+    .map((item) => item.text)
+    .join('\n');
+}
+
+function approvalTestFailureState(error) {
+  const text = String(error?.message || error || '');
+  return /timed out|timeout/i.test(text) ? 'execution_unknown' : 'approved_retryable';
+}
+
 async function executeTool(payload, sourcePayload = null) {
   const toolName = payload?.params?.name;
   if (toolName === 'list_devices') {
@@ -379,7 +427,7 @@ async function executeTool(payload, sourcePayload = null) {
       devices: hub.listStatus(),
     });
   }
-  if (toolName === 'request_temporary_permission') {
+  if (toolName === 'approval_test_exec') {
     const args = payload?.params?.arguments || {};
     const device = typeof args.deviceId === 'string' ? getDevice(args.deviceId) : null;
     if (!device) {
@@ -391,13 +439,16 @@ async function executeTool(payload, sourcePayload = null) {
       }, { isError: true });
     }
     try {
-      const prepared = permissionManager.request({
+      const pending = approvalTestManager.request({
         deviceId: device.deviceId,
+        command: args.command,
+        shell: args.shell,
+        timeoutMs: args.timeout_ms,
         justification: args.justification,
-        hostSession: hostSessionFor(payload, sourcePayload),
       });
-      return structuredToolResult(prepared.request, {
-        meta: { approval_nonce: prepared.approvalNonce },
+      return approvalTestPendingResult({
+        ...pending,
+        output: 'Approval required. Call request_approval_test with this approval_id to display the WCM test approval card.',
       });
     } catch (error) {
       return structuredToolResult(
@@ -406,15 +457,91 @@ async function executeTool(payload, sourcePayload = null) {
       );
     }
   }
-  if (toolName === 'resolve_temporary_permission') {
+  if (toolName === 'request_approval_test') {
     const args = payload?.params?.arguments || {};
     try {
-      return structuredToolResult(permissionManager.resolve({
-        approvalId: args.approval_id,
-        approvalNonce: args.approval_nonce,
-        decision: args.decision,
+      const prepared = approvalTestManager.prepareAppApproval(args.approval_id, {
         hostSession: hostSessionFor(payload, sourcePayload),
-      }));
+      });
+      return approvalTestCardResult(prepared);
+    } catch (error) {
+      return structuredToolResult(
+        { error: String(error?.message || error) },
+        { isError: true },
+      );
+    }
+  }
+  if (toolName === 'resolve_approval_test') {
+    const args = payload?.params?.arguments || {};
+    const hostSession = hostSessionFor(payload, sourcePayload);
+    try {
+      if (args.decision === 'deny') {
+        const denied = approvalTestManager.deny(
+          args.approval_id,
+          args.approval_nonce,
+          hostSession,
+        );
+        return structuredToolResult({
+          ...denied,
+          output: 'The user denied the frozen WCM test command. It was not dispatched.',
+        });
+      }
+      if (args.decision !== 'approve') {
+        throw new Error('decision must be approve or deny.');
+      }
+      const claimed = approvalTestManager.claim(
+        args.approval_id,
+        args.approval_nonce,
+        hostSession,
+      );
+      const device = getDevice(claimed.action.deviceId);
+      if (!device || !hub.connectionInfo(device.deviceId)) {
+        const retryable = approvalTestManager.markRetryable(args.approval_id);
+        return structuredToolResult({
+          ...retryable,
+          output: 'The approved test command was not dispatched because the target worker is offline.',
+        });
+      }
+      const workerPayload = {
+        jsonrpc: '2.0',
+        id: 'approval-test-' + randomUUID(),
+        method: 'tools/call',
+        params: {
+          name: 'start_process',
+          arguments: {
+            command: claimed.action.command,
+            timeout_ms: claimed.action.timeoutMs,
+            ...(claimed.action.shell ? { shell: claimed.action.shell } : {}),
+          },
+        },
+      };
+      try {
+        const message = await callWorker(device.deviceId, workerPayload, sourcePayload);
+        const consumed = approvalTestManager.markConsumed(args.approval_id);
+        if (message.error) {
+          return structuredToolResult({
+            ...consumed,
+            action_failed: true,
+            output: String(message.error?.message || JSON.stringify(message.error)),
+            worker_error: message.error,
+          });
+        }
+        const workerResult = message.result || {};
+        return structuredToolResult({
+          ...consumed,
+          output: workerToolText(workerResult) || 'Approved test command completed.',
+          worker_result: workerResult,
+        });
+      } catch (error) {
+        const state = approvalTestFailureState(error);
+        const transitioned = state === 'execution_unknown'
+          ? approvalTestManager.markUnknown(args.approval_id)
+          : approvalTestManager.markRetryable(args.approval_id);
+        return structuredToolResult({
+          ...transitioned,
+          output: String(error?.message || error),
+        });
+      }
     } catch (error) {
       return structuredToolResult(
         { error: String(error?.message || error) },
@@ -450,7 +577,7 @@ async function executeTool(payload, sourcePayload = null) {
       error: 'A valid temporary permission is required for this device.',
       permission_state: permission.state,
       device_id: device.deviceId,
-      action: 'Call request_temporary_permission for this device and obtain user approval.',
+      action: 'New temporary permission issuance is currently disabled. Use an existing active permissionId.',
     }, {
       isError: true,
       context: { deviceOnline: Boolean(hub.connectionInfo(device.deviceId)) },
@@ -489,7 +616,7 @@ function modernDiscovery(id) {
     result: modernResult({
       supportedVersions: [MODERN_PROTOCOL],
       capabilities: { tools: { listChanged: true }, resources: {} },
-      instructions: `Every Desktop Commander tool requires an explicit deviceId and a matching temporary permissionId. Default device: ${registry.defaultDeviceId}. Use list_devices to discover devices, then request_temporary_permission when a permission is missing or expired. Approved permissions last at most 6 hours and are device-bound.\n\n${SPECIALIZED_CAPABILITIES}\n\n${WCM_ERROR_SEMANTICS}`,
+      instructions: `Every Desktop Commander tool requires an explicit deviceId and an existing active temporary permissionId. New temporary permission issuance is currently disabled. approval_test_exec is an isolated test-only approval path that can execute one frozen test command after approval; it does not grant a permissionId and does not change ordinary WCM tool access. Default device: ${registry.defaultDeviceId}.\n\n${SPECIALIZED_CAPABILITIES}\n\n${WCM_ERROR_SEMANTICS}`,
       ttlMs: 5000,
       cacheScope: 'private',
     }),
@@ -555,7 +682,7 @@ function legacyInitializeResult(payload) {
       protocolVersion: LEGACY_PROTOCOL,
       capabilities: { tools: { listChanged: true }, resources: {} },
       serverInfo,
-      instructions: `Every Desktop Commander tool requires an explicit deviceId and a matching temporary permissionId. Default device: ${registry.defaultDeviceId}. Use list_devices to discover devices, then request_temporary_permission when a permission is missing or expired. Approved permissions last at most 6 hours and are device-bound.\n\n${SPECIALIZED_CAPABILITIES}\n\n${WCM_ERROR_SEMANTICS}`,
+      instructions: `Every Desktop Commander tool requires an explicit deviceId and an existing active temporary permissionId. New temporary permission issuance is currently disabled. approval_test_exec is an isolated test-only approval path that can execute one frozen test command after approval; it does not grant a permissionId and does not change ordinary WCM tool access. Default device: ${registry.defaultDeviceId}.\n\n${SPECIALIZED_CAPABILITIES}\n\n${WCM_ERROR_SEMANTICS}`,
     },
   };
 }

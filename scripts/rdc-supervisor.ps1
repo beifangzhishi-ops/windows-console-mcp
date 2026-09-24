@@ -79,13 +79,6 @@ try {
             if(-not $tailIp){ throw 'Tailscale IPv4 was unavailable.' }
             $env:WC_WORKER_REMOTE_HOST = $tailIp
             $env:WC_WORKER_REMOTE_PORT = '18100'
-            foreach($name in @('WC_TEMP_PERMISSION_TTL_SECONDS','WC_PERMISSION_APPROVAL_TTL_SECONDS')){
-                $line = Get-Content -LiteralPath $configFile | Where-Object { $_ -match ("^\s*" + [regex]::Escape($name) + "\s*=") } | Select-Object -First 1
-                if($line){
-                    $value = ($line -replace ("^\s*" + [regex]::Escape($name) + "\s*=\s*"),'').Trim()
-                    if($value){ [Environment]::SetEnvironmentVariable($name,$value,'Process') }
-                }
-            }
             foreach($port in @(18009,18101,18100,18008)){
                 if(Listener $port){ throw "Port $port is already in use; refusing to claim it." }
             }
