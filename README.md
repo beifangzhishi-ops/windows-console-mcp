@@ -65,7 +65,7 @@ The current approval work is isolated behind one test-only execution path:
 
 MCP Apps are negotiated per modern MCP request. `server/discover` advertises the `io.modelcontextprotocol/ui` extension with `text/html;profile=mcp-app`; the approval tools and resource are exposed only when the client request advertises the same capability. Legacy/text-only clients continue to receive ordinary WCM tools but do not receive the approval-test tools or approval UI resource.
 
-The approval View uses the official `@modelcontextprotocol/ext-apps` `App` client rather than a hand-written postMessage bridge. Vite builds it as one self-contained HTML file. At router startup WCM hashes that HTML and derives the active `ui://wcm/approval-test/<hash>.html` resource URI, so changed UI content automatically gets a fresh host cache key without retaining old UI routes.
+The approval View uses the official `@modelcontextprotocol/ext-apps` `App` client. Vite builds it as one self-contained HTML file. At router startup WCM hashes that HTML and derives the active `ui://wcm/approval-test/<hash>.html` resource URI, so changed UI content automatically gets a fresh host cache key.
 
 The router also advertises bundled specialized capabilities in MCP discovery, `list_devices`, and `start_process` descriptions so an LLM can discover them without pretending that each helper is a standalone MCP action. The current catalog contains two capabilities: Bilibili download under `tools/bilibili-download` (including its bridge and bundled `yt-dlp.exe` fallback) and Quark transfer under `tools/quark-transfer`. Their READMEs remain the source of truth for invocation details and authentication requirements.
 
@@ -96,26 +96,31 @@ https://your-machine.your-tailnet.ts.net/rdc/mcp
 
 `RDC_ISSUER` and `RDC_RESOURCE` are deployment-specific and are never hard-coded by the sidecar.
 
-### Rebuilding host tools after a schema change
+### ChatGPT rebuild handoff rule
 
-The MCP host may keep an older tool schema after the WCM Router has already reloaded new code. An OAuth reconnect alone does not guarantee a tool-schema refresh. If direct `server/discover` / `tools/list` checks show the current Router schema but the host still exposes old WCM tools, rebuild or recreate the host-side WCM MCP tool registration/connector so the host performs fresh discovery. Then start a fresh chat/session and verify the actual client-visible tool names, descriptions, schemas, and MCP App metadata before changing the server again.
+ChatGPT-side WCM/plugin/connector rebuilds are **user-operated**. The assistant must not rename, delete, recreate, reconnect, or otherwise rebuild the ChatGPT WCM registration on the user's behalf unless the user explicitly overrides this rule for that rebuild.
 
-For this controller checkout, the following PowerShell commands use absolute paths and print the configured WCM key and public MCP URL. The key command prints secret material to the local console; do not paste its output into logs, commits, screenshots, or shared terminals.
+When a tool-schema change means the ChatGPT registration needs to be rebuilt, the assistant should stop at the handoff boundary and provide only the information the user needs to rebuild it:
 
-```powershell
-# Print the WCM approval key.
-Get-Content -LiteralPath "C:\Users\Songjx\Documents\ChatGPT\windows-console-mcp\.state\rdc-approval-secret.txt" -Raw
+1. Resolve the current public MCP resource from `RDC_RESOURCE` (normally from ignored `config/rdc.env`) and give that MCP address to the user.
+2. If the host cache needs to be refreshed or the tools need to be rebuilt, give the user the following absolute-path PowerShell command so they can print the current WCM key and URL in their own terminal. Do not copy the printed key into chat:
 
-# Print only the configured public MCP URL (RDC_RESOURCE).
-((Get-Content -LiteralPath "C:\Users\Songjx\Documents\ChatGPT\windows-console-mcp\config\rdc.env" | Where-Object { $_ -match '^\s*RDC_RESOURCE\s*=' } | Select-Object -First 1) -replace '^\s*RDC_RESOURCE\s*=\s*','').Trim()
-```
+   ```powershell
+   $wcmKey = (Get-Content -LiteralPath 'C:\Users\Songjx\Documents\ChatGPT\windows-console-mcp\.state\rdc-approval-secret.txt' -Raw).Trim()
+   $wcmUrl = ((Get-Content -LiteralPath 'C:\Users\Songjx\Documents\ChatGPT\windows-console-mcp\config\rdc.env' | Where-Object { $_ -match '^RDC_RESOURCE=' } | Select-Object -First 1) -replace '^RDC_RESOURCE=', '').Trim().Trim('"')
+   Write-Output ("WCM key: " + $wcmKey)
+   Write-Output ("WCM URL: " + $wcmUrl)
+   ```
+
+3. Do not use BMG to operate ChatGPT settings, rename the existing connector, create a replacement connector/plugin, or complete OAuth/consent for the user.
+4. If the current ChatGPT UI requires an archive upload, do not proactively build or upload a plugin archive as part of rebuild. Only build/provide one when the user explicitly asks for the archive.
 
 ## Troubleshooting
 
 When a live WCM deployment behaves differently from the checked-out code, debug the runtime path before changing client configuration. The most common failure modes are stale processes, worker connection churn, or a tool-discovery request that never completed.
 
 - **Code on disk is not proof that the live process reloaded it.** Compare the running router/worker PIDs and start times with the change you expect to be live. Then query the live router directly (`server/discover`, `tools/list`, or the relevant tool call) instead of inferring state from the checkout alone. After a restart, confirm that the PID changed and that `list_devices` works again.
-- **OAuth reconnect and tool-schema refresh are separate events.** Reconnecting a client can refresh credentials without causing it to request `server/discover` or `tools/list` again. Use sidecar logs to verify that a discovery/list request actually arrived and completed. If the server response is current but the host still exposes an older schema, rebuild/recreate the host-side WCM MCP tool registration/connector, then use a fresh chat/session and verify the client-visible schema before changing the server again.
+- **OAuth reconnect and tool-schema refresh are separate events.** Reconnecting a client can refresh credentials without causing it to request `server/discover` or `tools/list` again. Use sidecar logs to verify that a discovery/list request actually arrived and completed. When the ChatGPT registration needs to be rebuilt, follow the **ChatGPT rebuild handoff rule** above.
 - **A `tools/list` timeout can look like stale schema or client caching.** Inspect MCP BEGIN/END log pairs and elapsed time. If `server/discover` succeeds but `tools/list` is missing an END record, is cancelled, or takes tens of seconds, fix that transport/runtime failure first. Once healthy, `tools/list` should normally complete quickly and consistently.
 - **Only one active worker should own a given `deviceId`.** Duplicate or orphaned workers using the same ID can repeatedly replace each other's connection, causing reconnect loops and invalidating in-flight RPCs. Check worker-hub logs for frequent `Worker connected` messages and inspect process parentage. Keep the supervisor-owned worker and terminate stale/manual copies rather than starting another copy on top of them.
 - **Large tool results are capped at the router boundary.** `tools/call` results larger than 512 KiB are replaced with a compact error before they reach the MCP client (`WC_MAX_TOOL_RESULT_BYTES` can override the limit). Large images are previewed at a 64 KiB raw budget, and `read_multiple_files` advertises a four-image batch limit to avoid cumulative media payload spikes.
