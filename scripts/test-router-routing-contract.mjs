@@ -32,8 +32,8 @@ assert.deepEqual(stripped, { value: 'forward-me' });
 
 const approvalTools = approvalTestRouterTools(deviceSchema);
 const testExec = approvalTools.find((tool) => tool.name === 'approval_test_exec');
-const requestCard = approvalTools.find((tool) => tool.name === 'request_approval_test');
-const resolver = approvalTools.find((tool) => tool.name === 'resolve_approval_test');
+const requestCard = approvalTools.find((tool) => tool.name === 'request_approval');
+const resolver = approvalTools.find((tool) => tool.name === 'resolve_pending_action');
 assert.ok(testExec && requestCard && resolver);
 assert.equal(testExec._meta, undefined);
 assert.deepEqual(testExec.inputSchema.required, ['deviceId']);

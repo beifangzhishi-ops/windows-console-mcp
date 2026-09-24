@@ -2,6 +2,16 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { Server as McpProtocolServer } from '@modelcontextprotocol/sdk/server/index.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import {
+  CallToolRequestSchema,
+  ListResourcesRequestSchema,
+  ListResourceTemplatesRequestSchema,
+  ListToolsRequestSchema,
+  ReadResourceRequestSchema,
+  isInitializeRequest,
+} from '@modelcontextprotocol/sdk/types.js';
 import { loadDeviceRegistry } from './devices.mjs';
 import { WorkerHub } from './worker-hub.mjs';
 import {
@@ -31,6 +41,7 @@ const WORKER_PORT = Number(process.env.WC_WORKER_PORT || 18101);
 const WORKER_REMOTE_HOST = process.env.WC_WORKER_REMOTE_HOST || '';
 const WORKER_REMOTE_PORT = Number(process.env.WC_WORKER_REMOTE_PORT || 18100);
 const MCP_PATH = '/mcp';
+const CCM_PARITY_MCP_PATH = '/mcp-ccm';
 const MODERN_PROTOCOL = '2026-07-28';
 const LEGACY_PROTOCOL = '2025-06-18';
 const MAX_BODY_BYTES = 1024 * 1024;
@@ -64,6 +75,8 @@ const hub = new WorkerHub({
   logger: routerLogger,
 });
 const legacySessions = new Map();
+const ccmParityTransports = new Map();
+const ccmParityServers = new Map();
 const workerInitialization = new Map();
 const toolListCache = new ConnectionScopedToolListCache();
 
@@ -309,7 +322,7 @@ function approvalTestPendingResult(value) {
         'Device: ' + structured.device_id,
         'Command: ' + structured.command,
         'Expires: ' + structured.expires_at,
-        'Call request_approval_test with this approval_id to render the approval card. Do not run the command yourself.',
+        'Call request_approval with this approval_id to render the approval card. Do not run the command yourself.',
       ].join('\n'),
     }],
     structuredContent: structured,
@@ -438,7 +451,7 @@ async function executeTool(payload, sourcePayload = null, { allowApproval = true
       devices: hub.listStatus(),
     });
   }
-  if (!allowApproval && ['approval_test_exec', 'request_approval_test', 'resolve_approval_test'].includes(toolName)) {
+  if (!allowApproval && ['approval_test_exec', 'request_approval', 'resolve_pending_action'].includes(toolName)) {
     return structuredToolResult({
       error: 'Approval-test tools are not available on the legacy MCP transport.',
     }, { isError: true });
@@ -461,7 +474,7 @@ async function executeTool(payload, sourcePayload = null, { allowApproval = true
       });
       return approvalTestPendingResult({
         ...pending,
-        output: 'Approval required. Call request_approval_test with this approval_id to display the WCM test approval card.',
+        output: 'Approval required. Call request_approval with this approval_id to display the WCM test approval card.',
       });
     } catch (error) {
       return structuredToolResult(
@@ -470,7 +483,7 @@ async function executeTool(payload, sourcePayload = null, { allowApproval = true
       );
     }
   }
-  if (toolName === 'request_approval_test') {
+  if (toolName === 'request_approval') {
     const args = payload?.params?.arguments || {};
     try {
       const prepared = approvalTestManager.prepareAppApproval(args.approval_id, {
@@ -484,7 +497,7 @@ async function executeTool(payload, sourcePayload = null, { allowApproval = true
       );
     }
   }
-  if (toolName === 'resolve_approval_test') {
+  if (toolName === 'resolve_pending_action') {
     const args = payload?.params?.arguments || {};
     const hostSession = hostSessionFor(payload, sourcePayload);
     try {
@@ -589,6 +602,98 @@ async function executeTool(payload, sourcePayload = null, { allowApproval = true
       error: String(error?.message || error),
     }, true, { deviceOnline: Boolean(hub.connectionInfo(device.deviceId)) });
   }
+}
+
+function ccmParityInstructions() {
+  return `Every Desktop Commander tool requires an explicit deviceId. Ordinary WCM tools route directly to the selected worker and are not blocked by the approval test flow. approval_test_exec is an isolated test-only approval path for one frozen hostname action. Default device: ${registry.defaultDeviceId}.\n\n${SPECIALIZED_CAPABILITIES}\n\n${WCM_ERROR_SEMANTICS}`;
+}
+
+function unwrapRoutedResult(message, fallback) {
+  if (message?.error) {
+    throw new Error(String(message.error?.message || JSON.stringify(message.error)));
+  }
+  return message?.result || fallback;
+}
+
+function createCcmParityProtocolServer() {
+  const protocolServer = new McpProtocolServer(serverInfo, {
+    capabilities: {
+      tools: { listChanged: true },
+      resources: { listChanged: true },
+    },
+    instructions: ccmParityInstructions(),
+  });
+
+  const sdkEnvelope = (request) => ({
+    jsonrpc: '2.0',
+    id: 'sdk-' + randomUUID(),
+    method: request.method,
+    params: request.params || {},
+  });
+
+  protocolServer.setRequestHandler(ListToolsRequestSchema, async (request) => ({
+    tools: await listTools(sdkEnvelope(request)),
+  }));
+  protocolServer.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const payload = sdkEnvelope(request);
+    return enforceToolResultSize(await executeTool(payload, payload), payload);
+  });
+  protocolServer.setRequestHandler(ListResourcesRequestSchema, async (request) => {
+    const payload = sdkEnvelope(request);
+    return unwrapRoutedResult(await routeResource(payload, payload), { resources: [] });
+  });
+  protocolServer.setRequestHandler(ListResourceTemplatesRequestSchema, async (request) => {
+    const payload = sdkEnvelope(request);
+    return unwrapRoutedResult(await routeResource(payload, payload), { resourceTemplates: [] });
+  });
+  protocolServer.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+    const payload = sdkEnvelope(request);
+    return unwrapRoutedResult(await routeResource(payload, payload), { contents: [] });
+  });
+  return protocolServer;
+}
+
+async function handleCcmParityMcp(request, response) {
+  const sessionHeader = request.headers['mcp-session-id'];
+  const sessionId = typeof sessionHeader === 'string' ? sessionHeader : null;
+  let payload = null;
+  if (request.method === 'POST') {
+    const body = await readBody(request);
+    try { payload = JSON.parse(body); }
+    catch {
+      sendJson(response, 400, jsonRpcError(null, -32700, 'Parse error.'));
+      return;
+    }
+  }
+
+  let transport = sessionId ? ccmParityTransports.get(sessionId) : null;
+  if (!transport) {
+    if (request.method !== 'POST' || sessionId || !isInitializeRequest(payload)) {
+      sendJson(response, 400, jsonRpcError(null, -32000, 'Missing or invalid MCP session.'));
+      return;
+    }
+    const protocolServer = createCcmParityProtocolServer();
+    transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: () => randomUUID(),
+      onsessioninitialized: (newSessionId) => {
+        ccmParityTransports.set(newSessionId, transport);
+        ccmParityServers.set(newSessionId, protocolServer);
+        appendRouterTrace('SDK', `session_initialized id=${newSessionId}`);
+      },
+    });
+    transport.onclose = async () => {
+      const id = transport.sessionId;
+      if (!id) return;
+      ccmParityTransports.delete(id);
+      const ownedServer = ccmParityServers.get(id);
+      ccmParityServers.delete(id);
+      if (ownedServer) await ownedServer.close().catch(() => {});
+      appendRouterTrace('SDK', `session_closed id=${id}`);
+    };
+    await protocolServer.connect(transport);
+  }
+
+  await transport.handleRequest(request, response, payload);
 }
 
 function modernDiscovery(id) {
@@ -782,6 +887,16 @@ async function handleRequest(request, response) {
     });
     return;
   }
+  if (url.pathname === CCM_PARITY_MCP_PATH) {
+    if (!['GET', 'POST', 'DELETE'].includes(request.method)) {
+      response.statusCode = 405;
+      response.setHeader('Allow', 'GET, POST, DELETE');
+      response.end();
+      return;
+    }
+    await handleCcmParityMcp(request, response);
+    return;
+  }
   if (url.pathname !== MCP_PATH) {
     sendJson(response, 404, { error: 'not_found' });
     return;
@@ -863,6 +978,11 @@ async function stop() {
   if (stopping) return;
   stopping = true;
   if (pingTimer) clearInterval(pingTimer);
+  for (const transport of ccmParityTransports.values()) {
+    await transport.close().catch(() => {});
+  }
+  ccmParityTransports.clear();
+  ccmParityServers.clear();
   await hub.stop();
   await new Promise((resolve) => server.close(() => resolve()));
 }

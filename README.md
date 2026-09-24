@@ -59,13 +59,15 @@ The router adds `list_devices` and requires `deviceId` on every Desktop Commande
 The current approval work is isolated behind one test-only execution path:
 
 1. Call `approval_test_exec` with an exact `deviceId`. WCM freezes one fixed read-only `hostname` test action and returns `approval_required=true` without executing it.
-2. Call `request_approval_test` with only the returned `approval_id`. This presents the MCP App card, generates the hidden one-time nonce, and binds the request to the host session when available.
-3. The card calls the app-only `resolve_approval_test` tool. Approve dispatches only the frozen command to the target worker through `start_process`; Deny does not dispatch it.
+2. Call `request_approval` with only the returned `approval_id`. This presents the MCP App card, generates the hidden one-time nonce, and binds the request to the host session when available.
+3. The card calls the app-only `resolve_pending_action` tool. Approve dispatches only the frozen command to the target worker through `start_process`; Deny does not dispatch it.
 4. The App writes the terminal result into model context and asks ChatGPT to continue without reconstructing the command.
 
-The modern ChatGPT-facing approval surface follows the currently working CCM wire contract: approval tools and the approval resource are ordinary modern MCP tools/resources without a separate UI capability negotiation layer. `request_approval_test` carries `ui.resourceUri`, `ui/resourceUri`, `openai/outputTemplate`, and `openai/widgetAccessible`; `resolve_approval_test` is app-only and widget-accessible. The legacy stateful transport remains ordinary-WCM-only and does not expose the approval-test tools or approval resource.
+The modern ChatGPT-facing approval surface follows the currently working CCM wire contract: approval tools and the approval resource are ordinary modern MCP tools/resources without a separate UI capability negotiation layer. `request_approval` carries `ui.resourceUri`, `ui/resourceUri`, `openai/outputTemplate`, and `openai/widgetAccessible`; `resolve_pending_action` is app-only and widget-accessible. The legacy stateful transport remains ordinary-WCM-only and does not expose the approval-test tools or approval resource.
 
-The approval View is one static `String.raw` HTML document intentionally kept structurally aligned with CCM's current working approval View. It uses the same classic inline-script layout, `ui/initialize` / `ui/notifications/initialized` lifecycle, tool-result notifications, `tools/call`, `ui/update-model-context`, and ChatGPT `window.openai` globals (`toolResponseMetadata`, `toolOutput`, `openai:set_globals`, intrinsic-height notification, and follow-up continuation). WCM keeps a content-hashed `ui://wcm/approval-test/<hash>.html` URI so changed HTML receives a fresh Host cache key.
+For transport-level A/B validation, WCM also exposes `/rdc/mcp-ccm`. It uses the same OAuth issuer and WCM business routing but runs the Host-facing connection through the MCP SDK `StreamableHTTPServerTransport`, matching CCM's initialize/session lifecycle. The existing `/rdc/mcp` endpoint remains unchanged while this parity path is being validated.
+
+The approval View is one static `String.raw` HTML document intentionally kept structurally aligned with CCM's current working approval View. It uses the same classic inline-script layout, `ui/initialize` / `ui/notifications/initialized` lifecycle, tool-result notifications, `tools/call`, `ui/update-model-context`, and ChatGPT `window.openai` globals (`toolResponseMetadata`, `toolOutput`, `openai:set_globals`, intrinsic-height notification, and follow-up continuation). The resource path is fixed at `ui://wcm/approval-v1.html`, matching CCM's fixed-URI pattern while keeping the WCM namespace distinct.
 
 The router also advertises bundled specialized capabilities in MCP discovery, `list_devices`, and `start_process` descriptions so an LLM can discover them without pretending that each helper is a standalone MCP action. The current catalog contains two capabilities: Bilibili download under `tools/bilibili-download` (including its bridge and bundled `yt-dlp.exe` fallback) and Quark transfer under `tools/quark-transfer`. Their READMEs remain the source of truth for invocation details and authentication requirements.
 
@@ -84,6 +86,7 @@ To exercise an already configured live controller and sidecar, run:
 
 ```powershell
 npm run test:live
+npm run test:ccm-parity
 ```
 
 The live suite covers legacy OAuth/stateful MCP, MCP `2026-07-28`, the CCM-aligned ChatGPT approval surface, the isolated approval-test execution path, direct ordinary-tool routing, device routing, resources, and duplicate external JSON-RPC IDs. It uses the configured OAuth deployment and can register test clients and execute the frozen approval-test command on the target worker, so it is intentionally separate from the default CI test.

@@ -6,7 +6,7 @@ import {
 
 const html = APPROVAL_TEST_UI_HTML;
 
-assert.match(APPROVAL_TEST_UI_URI, /^ui:\/\/wcm\/approval-test\/[a-f0-9]{16}\.html$/u);
+assert.equal(APPROVAL_TEST_UI_URI, 'ui://wcm/approval-v1.html');
 assert.match(html, /<div id="title">WCM approval<\/div>/);
 assert.match(html, /<script>\s*\(\(\) => \{/);
 assert.doesNotMatch(html, /type=["']module["']/i);
@@ -19,7 +19,7 @@ for (const marker of [
   'ui/notifications/initialized',
   'ui/notifications/tool-result',
   'tools/call',
-  'resolve_approval_test',
+  'resolve_pending_action',
   'ui/update-model-context',
   'window.openai?.toolResponseMetadata',
   'window.openai?.toolOutput',

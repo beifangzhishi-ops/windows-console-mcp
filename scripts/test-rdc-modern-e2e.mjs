@@ -145,8 +145,8 @@ async function runModern(approvalSecret) {
   const listDevicesTool = tools.find((tool) => tool?.name === 'list_devices');
   const getConfigTool = tools.find((tool) => tool?.name === 'get_config');
   const approvalTestExecTool = tools.find((tool) => tool?.name === 'approval_test_exec');
-  const requestApprovalTestTool = tools.find((tool) => tool?.name === 'request_approval_test');
-  const resolveApprovalTestTool = tools.find((tool) => tool?.name === 'resolve_approval_test');
+  const requestApprovalTestTool = tools.find((tool) => tool?.name === 'request_approval');
+  const resolveApprovalTestTool = tools.find((tool) => tool?.name === 'resolve_pending_action');
   if (!listDevicesTool || !getConfigTool || !approvalTestExecTool ||
       !requestApprovalTestTool || !resolveApprovalTestTool) {
     throw new Error('required routed tools were not listed.');
@@ -161,24 +161,24 @@ async function runModern(approvalSecret) {
     throw new Error('approval_test_exec must not expose approval-card metadata.');
   }
   if (requestApprovalTestTool._meta?.ui?.resourceUri !== APPROVAL_TEST_UI_URI) {
-    throw new Error('request_approval_test did not expose the current WCM approval test resource.');
+    throw new Error('request_approval did not expose the current WCM approval resource.');
   }
-  if (!/^ui:\/\/wcm\/approval-test\/[a-f0-9]{16}\.html$/u.test(APPROVAL_TEST_UI_URI)) {
-    throw new Error('approval UI URI is not content-hashed.');
+  if (APPROVAL_TEST_UI_URI !== 'ui://wcm/approval-v1.html') {
+    throw new Error('approval UI URI did not match the fixed CCM-style resource path.');
   }
   if (requestApprovalTestTool._meta?.ui?.visibility?.join(',') !== 'model,app') {
-    throw new Error('request_approval_test did not expose model+app visibility.');
+    throw new Error('request_approval did not expose model+app visibility.');
   }
   if (resolveApprovalTestTool._meta?.ui?.visibility?.join(',') !== 'app') {
-    throw new Error('resolve_approval_test is not app-only.');
+    throw new Error('resolve_pending_action is not app-only.');
   }
   if (requestApprovalTestTool._meta?.['ui/resourceUri'] !== APPROVAL_TEST_UI_URI ||
       requestApprovalTestTool._meta?.['openai/outputTemplate'] !== APPROVAL_TEST_UI_URI ||
       requestApprovalTestTool._meta?.['openai/widgetAccessible'] !== true) {
-    throw new Error('request_approval_test did not expose the required ChatGPT approval metadata.');
+    throw new Error('request_approval did not expose the required ChatGPT approval metadata.');
   }
   if (resolveApprovalTestTool._meta?.['openai/widgetAccessible'] !== true) {
-    throw new Error('resolve_approval_test did not expose ChatGPT app accessibility metadata.');
+    throw new Error('resolve_pending_action did not expose ChatGPT app accessibility metadata.');
   }
   if (requestApprovalTestTool.execution?.taskSupport !== 'forbidden' ||
       resolveApprovalTestTool.execution?.taskSupport !== 'forbidden') {
@@ -235,24 +235,24 @@ async function runModern(approvalSecret) {
     throw new Error('approval_test_exec generated an approval nonce before card presentation.');
   }
   const cardRequest = await mcp(accessToken, 6, 'tools/call', {
-    name: 'request_approval_test',
+    name: 'request_approval',
     arguments: { approval_id: approvalId },
     _meta: { 'openai/session': 'wcm-modern-e2e-session' },
   });
   const approvalNonce = cardRequest?._meta?.approval_nonce;
   if (!approvalNonce || cardRequest?.structuredContent?.approval_id !== approvalId) {
-    throw new Error('request_approval_test did not bind the frozen action to an approval card.');
+    throw new Error('request_approval did not bind the frozen action to an approval card.');
   }
   if (cardRequest?._meta?.source !== 'wcm.approval' ||
       cardRequest?.structuredContent?.wall_time_seconds !== 0 ||
       cardRequest?.structuredContent?.kind !== 'execution') {
-    throw new Error('request_approval_test did not match the CCM approval-card result envelope.');
+    throw new Error('request_approval did not match the CCM approval-card result envelope.');
   }
   if (Object.hasOwn(cardRequest?.structuredContent || {}, 'approval_nonce')) {
-    throw new Error('request_approval_test leaked approval_nonce into structuredContent.');
+    throw new Error('request_approval leaked approval_nonce into structuredContent.');
   }
   const wrongSessionApproval = await mcp(accessToken, 7, 'tools/call', {
-    name: 'resolve_approval_test',
+    name: 'resolve_pending_action',
     arguments: {
       approval_id: approvalId,
       approval_nonce: approvalNonce,
@@ -265,7 +265,7 @@ async function runModern(approvalSecret) {
     throw new Error('approval test was not bound to the host session.');
   }
   const approvalResult = await mcp(accessToken, 8, 'tools/call', {
-    name: 'resolve_approval_test',
+    name: 'resolve_pending_action',
     arguments: {
       approval_id: approvalId,
       approval_nonce: approvalNonce,
@@ -311,7 +311,7 @@ async function runModern(approvalSecret) {
   const approvalTestHtml = approvalTestUi?.contents?.[0]?.text || '';
   if (!approvalTestHtml.includes('<div id="title">WCM approval</div>') ||
       !approvalTestHtml.includes('const PROTOCOL_VERSION = "2026-01-26"') ||
-      !approvalTestHtml.includes('name: "resolve_approval_test"')) {
+      !approvalTestHtml.includes('name: "resolve_pending_action"')) {
     throw new Error('resources/read did not return WCM approval test HTML.');
   }
   if (approvalTestUi?.contents?.[0]?._meta?.ui?.prefersBorder !== true) {

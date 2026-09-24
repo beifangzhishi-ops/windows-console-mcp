@@ -42,7 +42,7 @@ export function approvalTestRouterTools(deviceSchema) {
       name: 'approval_test_exec',
       description: [
         'Test-only WCM execution path for validating the approval card.',
-        'This initial call does not execute anything. WCM freezes one fixed read-only hostname test for the selected device, returns approval_required=true, and then the model must call request_approval_test with the returned approval_id.',
+        'This initial call does not execute anything. WCM freezes one fixed read-only hostname test for the selected device, returns approval_required=true, and then the model must call request_approval with the returned approval_id.',
         'Only this test tool uses the test approval flow; ordinary WCM tools are unaffected.',
       ].join('\n\n'),
       annotations: {
@@ -66,7 +66,7 @@ export function approvalTestRouterTools(deviceSchema) {
       outputSchema: approvalTestOutputSchema(),
     },
     {
-      name: 'request_approval_test',
+      name: 'request_approval',
       description: [
         'Render the WCM approval test card for one already-frozen approval_test_exec action.',
         'Pass only the approval_id returned by approval_test_exec with approval_required=true. This tool cannot replace the frozen device or command.',
@@ -99,7 +99,7 @@ export function approvalTestRouterTools(deviceSchema) {
       outputSchema: approvalTestOutputSchema(),
     },
     {
-      name: 'resolve_approval_test',
+      name: 'resolve_pending_action',
       description: 'App-only resolver for one frozen WCM approval test command.',
       annotations: {
         readOnlyHint: false,

@@ -38,9 +38,9 @@ async function prepare() {
   });
   const approvalId = frozen?.structuredContent?.approval_id;
   if (!approvalId) throw new Error('approval_test_exec did not return approval_id.');
-  const card = await call('request_approval_test', { approval_id: approvalId });
+  const card = await call('request_approval', { approval_id: approvalId });
   const approvalNonce = card?._meta?.approval_nonce;
-  if (!approvalNonce) throw new Error('request_approval_test did not return approval nonce.');
+  if (!approvalNonce) throw new Error('request_approval did not return approval nonce.');
   return { approvalId, approvalNonce };
 }
 
@@ -48,12 +48,12 @@ const slow = await prepare();
 const fast = await prepare();
 
 const [slowResult, fastResult] = await Promise.all([
-  call('resolve_approval_test', {
+  call('resolve_pending_action', {
     approval_id: slow.approvalId,
     approval_nonce: slow.approvalNonce,
     decision: 'approve',
   }),
-  call('resolve_approval_test', {
+  call('resolve_pending_action', {
     approval_id: fast.approvalId,
     approval_nonce: fast.approvalNonce,
     decision: 'approve',

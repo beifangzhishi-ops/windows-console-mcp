@@ -188,8 +188,8 @@ async function runRound(round, approvalSecret) {
     }
   }
   const approvalTestExecTool = toolList.find((tool) => tool.name === 'approval_test_exec');
-  const requestApprovalTestTool = toolList.find((tool) => tool.name === 'request_approval_test');
-  const resolveApprovalTestTool = toolList.find((tool) => tool.name === 'resolve_approval_test');
+  const requestApprovalTestTool = toolList.find((tool) => tool.name === 'request_approval');
+  const resolveApprovalTestTool = toolList.find((tool) => tool.name === 'resolve_pending_action');
   if (approvalTestExecTool || requestApprovalTestTool || resolveApprovalTestTool) {
     throw new Error('Legacy client was exposed to MCP Apps approval tools.');
   }
@@ -208,7 +208,7 @@ async function runRound(round, approvalSecret) {
   if (!Array.isArray(resources) || !resources.some((item) => item?.uri === filePreviewUri)) {
     throw new Error('Legacy resources/list did not include file preview UI.');
   }
-  if (resources.some((item) => String(item?.uri || '').startsWith('ui://wcm/approval-test/'))) {
+  if (resources.some((item) => item?.uri === 'ui://wcm/approval-v1.html')) {
     throw new Error('Legacy resources/list exposed the WCM approval test UI.');
   }
 

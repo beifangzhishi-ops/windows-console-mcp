@@ -16,6 +16,7 @@
     "test:all": "npm test && npm run test:live",
     "test:legacy": "node scripts/test-rdc-e2e.mjs",
     "test:modern": "npm run check:ui && node scripts/test-rdc-modern-e2e.mjs",
+    "test:ccm-parity": "npm run check:ui && node scripts/test-rdc-ccm-parity-e2e.mjs",
     "test:concurrency": "node scripts/test-rpc-concurrency.mjs"
   },
   "dependencies": {

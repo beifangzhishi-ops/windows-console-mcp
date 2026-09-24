@@ -1,5 +1,3 @@
-import { createHash } from 'node:crypto';
-
 // Host-facing approval View intentionally mirrors CCM's currently working ChatGPT surface.
 export const APPROVAL_TEST_UI_HTML = String.raw`<!doctype html>
 <html lang="en">
@@ -316,7 +314,7 @@ export const APPROVAL_TEST_UI_HTML = String.raw`<!doctype html>
         );
         try {
           const result = await request("tools/call", {
-            name: "resolve_approval_test",
+            name: "resolve_pending_action",
             arguments: {
               approval_id: approval.approval_id,
               approval_nonce: approvalNonce,
@@ -448,5 +446,4 @@ export const APPROVAL_TEST_UI_HTML = String.raw`<!doctype html>
 </body>
 </html>`;
 
-const bundleHash = createHash('sha256').update(APPROVAL_TEST_UI_HTML).digest('hex').slice(0, 16);
-export const APPROVAL_TEST_UI_URI = `ui://wcm/approval-test/${bundleHash}.html`;
+export const APPROVAL_TEST_UI_URI = 'ui://wcm/approval-v1.html';

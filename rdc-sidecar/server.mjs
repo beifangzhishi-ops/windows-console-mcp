@@ -44,6 +44,7 @@ const REGISTER_PATH = '/rdc/register';
 const REVOKE_PATH = '/rdc/revoke';
 const CONSENT_PATH = '/rdc/oauth/consent';
 const MCP_PATH = '/rdc/mcp';
+const CCM_PARITY_MCP_PATH = '/rdc/mcp-ccm';
 const REGISTRATION_WINDOW_MS = 10 * 60 * 1000;
 const REGISTRATION_MAX_ATTEMPTS = 20;
 const AUTHORIZATION_DISCOVERY_PATHS = new Set([
@@ -53,6 +54,10 @@ const AUTHORIZATION_DISCOVERY_PATHS = new Set([
 const RESOURCE_DISCOVERY_PATHS = new Set([
   '/.well-known/oauth-protected-resource/rdc/mcp',
   '/rdc/mcp/.well-known/oauth-protected-resource',
+]);
+const CCM_PARITY_RESOURCE_DISCOVERY_PATHS = new Set([
+  '/.well-known/oauth-protected-resource/rdc/mcp-ccm',
+  '/rdc/mcp-ccm/.well-known/oauth-protected-resource',
 ]);
 
 function logMessage(logger, method, message) {
@@ -69,7 +74,7 @@ function setNoStore(response) {
 function setCors(response) {
   response.setHeader('Access-Control-Allow-Origin', '*');
   response.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  response.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, Mcp-Session-Id');
+  response.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, Mcp-Session-Id, Mcp-Protocol-Version, Last-Event-ID');
 }
 
 function sendJson(response, status, payload, options = {}) {
@@ -235,10 +240,24 @@ function parseBearerToken(request) {
   return match ? match[1] : null;
 }
 
-function sendUnauthorized(response, config) {
+function ccmParityResource(config) {
+  const resource = new URL(config.resource);
+  return resource.origin + CCM_PARITY_MCP_PATH;
+}
+
+function protectedResourceMetadataUrl(resource) {
+  const url = new URL(resource);
+  return `${url.origin}/.well-known/oauth-protected-resource${url.pathname}`;
+}
+
+function isSupportedResource(config, resource) {
+  return resource === config.resource || resource === ccmParityResource(config);
+}
+
+function sendUnauthorized(response, config, resource = config.resource) {
   response.setHeader(
     'WWW-Authenticate',
-    'Bearer resource_metadata="' + config.protectedResourceMetadataUrl + '"',
+    'Bearer resource_metadata="' + protectedResourceMetadataUrl(resource) + '"',
   );
   sendJson(response, 401, { error: 'invalid_token' }, { noStore: true });
 }
@@ -259,9 +278,9 @@ function buildAuthorizationServerMetadata(config) {
   };
 }
 
-function buildProtectedResourceMetadata(config) {
+function buildProtectedResourceMetadata(config, resource = config.resource) {
   return {
-    resource: config.resource,
+    resource,
     authorization_servers: [config.issuer],
     bearer_methods_supported: ['header'],
     scopes_supported: [OAUTH_SCOPE],
@@ -300,7 +319,7 @@ function validateAuthorizationRequest(parameters, runtime) {
     throw new OAuthError('invalid_request', 'PKCE S256 is required.');
   }
   const resource = parameters.get('resource') || runtime.config.resource;
-  if (resource !== runtime.config.resource) {
+  if (!isSupportedResource(runtime.config, resource)) {
     throw new OAuthError('invalid_target', 'The requested resource is not supported.');
   }
   const state = parameters.get('state') || '';
@@ -475,7 +494,7 @@ async function handleToken(request, response, runtime) {
       throw new OAuthError('invalid_client', 'OAuth client is not registered.');
     }
     const resource = form.get('resource') || runtime.config.resource;
-    if (resource !== runtime.config.resource) {
+    if (!isSupportedResource(runtime.config, resource)) {
       throw new OAuthError('invalid_target', 'The requested resource is not supported.');
     }
     let result;
@@ -543,7 +562,8 @@ async function handleRevocation(request, response, runtime) {
 function getUpstreamRequestPath(runtime, url) {
   const upstreamUrl = new URL(runtime.upstreamUrl);
   const basePath = upstreamUrl.pathname.replace(/\/+$/u, '');
-  return basePath + '/mcp' + url.search;
+  const mcpPath = url.pathname === CCM_PARITY_MCP_PATH ? '/mcp-ccm' : '/mcp';
+  return basePath + mcpPath + url.search;
 }
 
 function buildUpstreamHeaders(sourceHeaders, body, sessionId = null) {
@@ -991,6 +1011,47 @@ async function handleProtectedMcp(request, response, runtime, url) {
   }
 }
 
+async function handleProtectedCcmParityMcp(request, response, runtime, url) {
+  const resource = ccmParityResource(runtime.config);
+  const accessToken = parseBearerToken(request);
+  if (!accessToken || !runtime.store.validateAccessToken(accessToken, resource)) {
+    sendUnauthorized(response, runtime.config, resource);
+    return;
+  }
+  if (!['GET', 'POST', 'DELETE'].includes(request.method)) {
+    response.setHeader('Allow', 'GET, POST, DELETE');
+    sendJson(response, 405, { error: 'method_not_allowed' }, { noStore: true });
+    return;
+  }
+  const sessionId = typeof request.headers[MCP_SESSION_HEADER] === 'string'
+    ? request.headers[MCP_SESSION_HEADER]
+    : null;
+  let mcpTraceId = null;
+  try {
+    if (request.method === 'GET') {
+      proxyMcpStream(request, response, runtime, url, sessionId);
+      return;
+    }
+    const body = request.method === 'POST' ? await readBody(request) : null;
+    let payload = null;
+    if (body) {
+      try { payload = JSON.parse(body); } catch {}
+    }
+    mcpTraceId = beginMcpTrace(response, runtime, payload, request);
+    const upstreamResponse = await requestUpstreamBuffer(
+      runtime,
+      request.method,
+      url,
+      buildUpstreamHeaders(request.headers, body, sessionId),
+      body,
+    );
+    sendUpstreamResponse(response, upstreamResponse);
+  } catch (error) {
+    appendHttpTrace(runtime, 'UPSTREAM CCM-PARITY ERROR trace=' + (mcpTraceId || '-') + ' message=' + String(error?.message || error || 'unknown'));
+    sendJson(response, 502, { error: 'upstream_unavailable' }, { noStore: true });
+  }
+}
+
 async function handleRequest(request, response, runtime) {
   const url = new URL(request.url || '/', 'http://127.0.0.1');
   if (request.method === 'OPTIONS') {
@@ -1020,8 +1081,11 @@ async function handleRequest(request, response, runtime) {
     });
     return;
   }
-  if (RESOURCE_DISCOVERY_PATHS.has(url.pathname) && request.method === 'GET') {
-    sendJson(response, 200, buildProtectedResourceMetadata(runtime.config), {
+  if ((RESOURCE_DISCOVERY_PATHS.has(url.pathname) || CCM_PARITY_RESOURCE_DISCOVERY_PATHS.has(url.pathname)) && request.method === 'GET') {
+    const resource = CCM_PARITY_RESOURCE_DISCOVERY_PATHS.has(url.pathname)
+      ? ccmParityResource(runtime.config)
+      : runtime.config.resource;
+    sendJson(response, 200, buildProtectedResourceMetadata(runtime.config, resource), {
       noStore: true,
       cors: true,
     });
@@ -1049,6 +1113,10 @@ async function handleRequest(request, response, runtime) {
   }
   if (url.pathname === MCP_PATH) {
     await handleProtectedMcp(request, response, runtime, url);
+    return;
+  }
+  if (url.pathname === CCM_PARITY_MCP_PATH) {
+    await handleProtectedCcmParityMcp(request, response, runtime, url);
     return;
   }
   sendJson(response, 404, { error: 'not_found' });
