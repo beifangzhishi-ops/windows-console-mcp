@@ -10,9 +10,7 @@
   },
   "scripts": {
     "postinstall": "node scripts/apply-desktop-commander-image-guard.mjs",
-    "build:ui": "vite build --configLoader native && node scripts/normalize-approval-ui-html.mjs",
-    "typecheck:ui": "tsc -p ui/approval-test/tsconfig.json --noEmit",
-    "check:ui": "npm run typecheck:ui && npm run build:ui && node scripts/test-ui-bundle.mjs",
+    "check:ui": "node scripts/test-ui-bundle.mjs",
     "test": "npm run check:ui && node scripts/test-approval-test.mjs && node scripts/test-router-routing-contract.mjs && node scripts/test-self-contained.mjs",
     "test:live": "npm run check:ui && node scripts/test-rdc-e2e.mjs && node scripts/test-rdc-modern-e2e.mjs && node scripts/test-rpc-concurrency.mjs",
     "test:all": "npm test && npm run test:live",
@@ -21,13 +19,7 @@
     "test:concurrency": "node scripts/test-rpc-concurrency.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/ext-apps": "^2.0.0",
     "@modelcontextprotocol/sdk": "^1.30.1",
     "@wonderwhy-er/desktop-commander": "0.2.48"
-  },
-  "devDependencies": {
-    "typescript": "^7.0.2",
-    "vite": "^8.3.0",
-    "vite-plugin-singlefile": "^2.3.3"
   }
 }

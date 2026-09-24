@@ -1,5 +1,3 @@
-import { EXTENSION_ID, RESOURCE_MIME_TYPE } from '@modelcontextprotocol/ext-apps/server';
-
 const routerBase = process.env.WCM_ROUTER_URL || 'http://127.0.0.1:18009';
 const healthResponse = await fetch(`${routerBase}/health`);
 if (!healthResponse.ok) throw new Error(`router health returned HTTP ${healthResponse.status}`);
@@ -7,11 +5,6 @@ const health = await healthResponse.json();
 const deviceId = process.env.WCM_TEST_DEVICE_ID || health.defaultDeviceId;
 if (!deviceId) throw new Error('No default test device is available.');
 const headers = { 'Content-Type': 'application/json', 'MCP-Protocol-Version': '2026-07-28' };
-const clientCapabilities = {
-  extensions: {
-    [EXTENSION_ID]: { mimeTypes: [RESOURCE_MIME_TYPE] },
-  },
-};
 
 async function call(name, args) {
   const controller = new AbortController();
@@ -23,7 +16,6 @@ async function call(name, args) {
     params: {
       name,
       arguments: args,
-      _meta: { 'io.modelcontextprotocol/clientCapabilities': clientCapabilities },
     },
   };
   try {

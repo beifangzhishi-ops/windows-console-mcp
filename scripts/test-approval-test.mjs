@@ -72,8 +72,10 @@ now = Date.parse(expiring.expires_at);
 assert.throws(() => manager.prepareAppApproval(expiring.approval_id), /Unknown or expired approval_id/);
 
 assert.match(APPROVAL_TEST_UI_URI, /^ui:\/\/wcm\/approval-test\/[a-f0-9]{16}\.html$/u);
-assert.match(APPROVAL_TEST_UI_HTML, /WCM approval test/);
-assert.match(APPROVAL_TEST_UI_HTML, /Loading MCP App/);
+assert.match(APPROVAL_TEST_UI_HTML, /<div id="title">WCM approval<\/div>/);
+assert.match(APPROVAL_TEST_UI_HTML, /const PROTOCOL_VERSION = "2026-01-26"/);
+assert.match(APPROVAL_TEST_UI_HTML, /window\.openai\?\.toolResponseMetadata/);
+assert.match(APPROVAL_TEST_UI_HTML, /name: "resolve_approval_test"/);
 assert.ok(audit.some((event) => event.event === 'requested'));
 assert.ok(audit.some((event) => event.event === 'app_bound'));
 assert.ok(audit.some((event) => event.event === 'consumed'));

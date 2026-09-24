@@ -63,9 +63,9 @@ The current approval work is isolated behind one test-only execution path:
 3. The card calls the app-only `resolve_approval_test` tool. Approve dispatches only the frozen command to the target worker through `start_process`; Deny does not dispatch it.
 4. The App writes the terminal result into model context and asks ChatGPT to continue without reconstructing the command.
 
-MCP Apps are negotiated per modern MCP request. `server/discover` advertises the `io.modelcontextprotocol/ui` extension with `text/html;profile=mcp-app`; the approval tools and resource are exposed only when the client request advertises the same capability. Legacy/text-only clients continue to receive ordinary WCM tools but do not receive the approval-test tools or approval UI resource.
+The modern ChatGPT-facing approval surface follows the currently working CCM wire contract: approval tools and the approval resource are ordinary modern MCP tools/resources without a separate UI capability negotiation layer. `request_approval_test` carries `ui.resourceUri`, `ui/resourceUri`, `openai/outputTemplate`, and `openai/widgetAccessible`; `resolve_approval_test` is app-only and widget-accessible. The legacy stateful transport remains ordinary-WCM-only and does not expose the approval-test tools or approval resource.
 
-The approval View uses the MCP Apps `postMessage` lifecycle (`ui/initialize`, tool-result notifications, app tool calls, and model-context updates) together with the ChatGPT `window.openai` globals used for initial tool results, intrinsic-height updates, and follow-up continuation. Vite compiles the TypeScript and single-file assets, then WCM normalizes the generated inline JavaScript to one classic script at the end of the body so the card DOM exists before the Host bridge starts. At router startup WCM hashes that final HTML and derives the active `ui://wcm/approval-test/<hash>.html` resource URI, so changed UI content automatically gets a fresh host cache key. The approval-card tool descriptor publishes the standard MCP Apps `ui.resourceUri`/`ui.visibility` fields together with the ChatGPT host fields `ui/resourceUri`, `openai/outputTemplate`, and `openai/widgetAccessible`; the resolver remains app-only and widget-accessible.
+The approval View is one static `String.raw` HTML document intentionally kept structurally aligned with CCM's current working approval View. It uses the same classic inline-script layout, `ui/initialize` / `ui/notifications/initialized` lifecycle, tool-result notifications, `tools/call`, `ui/update-model-context`, and ChatGPT `window.openai` globals (`toolResponseMetadata`, `toolOutput`, `openai:set_globals`, intrinsic-height notification, and follow-up continuation). WCM keeps a content-hashed `ui://wcm/approval-test/<hash>.html` URI so changed HTML receives a fresh Host cache key.
 
 The router also advertises bundled specialized capabilities in MCP discovery, `list_devices`, and `start_process` descriptions so an LLM can discover them without pretending that each helper is a standalone MCP action. The current catalog contains two capabilities: Bilibili download under `tools/bilibili-download` (including its bridge and bundled `yt-dlp.exe` fallback) and Quark transfer under `tools/quark-transfer`. Their READMEs remain the source of truth for invocation details and authentication requirements.
 
@@ -78,7 +78,7 @@ npm test
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\rdc-status.ps1
 ```
 
-`npm test` is self-contained with respect to test data/config, but do not launch it through the same live WCM connection that is controlling this checkout: doing so can interrupt that worker/gateway transport and cause temporary HTTP 502s. Run it from an independent local terminal instead. It type-checks and builds the MCP App, checks the frozen approval state machine and routing contracts, and covers OAuth state pruning/caps, worker heartbeat expiry, and reconnect isolation.
+`npm test` is self-contained with respect to test data/config, but do not launch it through the same live WCM connection that is controlling this checkout: doing so can interrupt that worker/gateway transport and cause temporary HTTP 502s. Run it from an independent local terminal instead. It validates the CCM-aligned static approval View, checks the frozen approval state machine and routing contracts, and covers OAuth state pruning/caps, worker heartbeat expiry, and reconnect isolation.
 
 To exercise an already configured live controller and sidecar, run:
 
@@ -86,7 +86,7 @@ To exercise an already configured live controller and sidecar, run:
 npm run test:live
 ```
 
-The live suite covers legacy OAuth/stateful MCP, MCP `2026-07-28`, MCP Apps capability negotiation, the isolated approval-test execution path, direct ordinary-tool routing, device routing, resources, and duplicate external JSON-RPC IDs. It uses the configured OAuth deployment and can register test clients and execute the frozen approval-test command on the target worker, so it is intentionally separate from the default CI test.
+The live suite covers legacy OAuth/stateful MCP, MCP `2026-07-28`, the CCM-aligned ChatGPT approval surface, the isolated approval-test execution path, direct ordinary-tool routing, device routing, resources, and duplicate external JSON-RPC IDs. It uses the configured OAuth deployment and can register test clients and execute the frozen approval-test command on the target worker, so it is intentionally separate from the default CI test.
 
 The public endpoint is configured by `RDC_RESOURCE`. With a Tailscale Funnel hostname it typically looks like:
 

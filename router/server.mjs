@@ -2,11 +2,6 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import {
-  EXTENSION_ID,
-  RESOURCE_MIME_TYPE,
-  getUiCapability,
-} from '@modelcontextprotocol/ext-apps/server';
 import { loadDeviceRegistry } from './devices.mjs';
 import { WorkerHub } from './worker-hub.mjs';
 import {
@@ -80,26 +75,6 @@ function getDevice(deviceId) {
   return registry.get(deviceId);
 }
 
-function clientCapabilitiesFor(payload, sourcePayload = null) {
-  const direct = payload?.params?._meta?.['io.modelcontextprotocol/clientCapabilities'];
-  if (direct && typeof direct === 'object') return direct;
-  const source = sourcePayload?.params?._meta?.['io.modelcontextprotocol/clientCapabilities'];
-  return source && typeof source === 'object' ? source : null;
-}
-
-function supportsMcpApps(payload, sourcePayload = null) {
-  const ui = getUiCapability(clientCapabilitiesFor(payload, sourcePayload));
-  return Boolean(ui?.mimeTypes?.includes(RESOURCE_MIME_TYPE));
-}
-
-function traceUiCapability(payload, sourcePayload = null) {
-  const ui = getUiCapability(clientCapabilitiesFor(payload, sourcePayload));
-  const mimeTypes = Array.isArray(ui?.mimeTypes) ? ui.mimeTypes.join(',') : '-';
-  appendRouterTrace(
-    'UI',
-    `method=${String(payload?.method || '-')} enabled=${supportsMcpApps(payload, sourcePayload)} mimeTypes=${mimeTypes}`,
-  );
-}
 function sendJson(response, status, body, headers = {}) {
   const text = JSON.stringify(body);
   response.statusCode = status;
@@ -310,29 +285,42 @@ function structuredToolResult(data, { isError = false, meta = null, context = {}
   }, context);
 }
 
+function approvalTestStatus(value) {
+  return {
+    wall_time_seconds: 0,
+    kind: 'execution',
+    environment_id: value?.device_id,
+    ...value,
+  };
+}
+
 function approvalTestPendingResult(value) {
+  const structured = approvalTestStatus({
+    ...value,
+    output: 'Approval required. Present the WCM approval card before executing the frozen hostname action.',
+  });
   return classifyToolResult({
     content: [{
       type: 'text',
       text: [
         'WCM froze a test command for approval.',
-        'Approval ID: ' + value.approval_id,
-        'Operation ID: ' + value.operation_id,
-        'Device: ' + value.device_id,
-        'Command: ' + value.command,
-        'Expires: ' + value.expires_at,
+        'Approval ID: ' + structured.approval_id,
+        'Operation ID: ' + structured.operation_id,
+        'Device: ' + structured.device_id,
+        'Command: ' + structured.command,
+        'Expires: ' + structured.expires_at,
         'Call request_approval_test with this approval_id to render the approval card. Do not run the command yourself.',
       ].join('\n'),
     }],
-    structuredContent: value,
+    structuredContent: structured,
   });
 }
 
 function approvalTestCardResult(prepared) {
-  const value = {
+  const value = approvalTestStatus({
     ...prepared.request,
     output: 'Waiting for the user to approve or deny this frozen WCM test command.',
-  };
+  });
   return classifyToolResult({
     content: [{
       type: 'text',
@@ -349,7 +337,7 @@ function approvalTestCardResult(prepared) {
     }],
     structuredContent: value,
     _meta: {
-      source: 'wcm.approval-test',
+      source: 'wcm.approval',
       approval_nonce: prepared.approvalNonce,
     },
   });
@@ -365,15 +353,13 @@ function enforceToolResultSize(result, payload) {
   return classifyToolResult(guarded.result);
 }
 
-async function listTools(sourcePayload = null) {
+async function listTools(sourcePayload = null, { includeApproval = true } = {}) {
   const deviceId = registry.defaultDeviceId;
   const connection = hub.connectionInfo(deviceId);
   if (!connection) throw new Error('Worker is offline: ' + deviceId);
   const cached = toolListCache.get(connection.connectionId);
   if (cached) {
-    return supportsMcpApps(sourcePayload, sourcePayload)
-      ? addApprovalTestTools(cached)
-      : cached;
+    return includeApproval ? addApprovalTestTools(cached) : cached;
   }
   const payload = {
     jsonrpc: '2.0',
@@ -389,9 +375,7 @@ async function listTools(sourcePayload = null) {
   const current = hub.connectionInfo(deviceId);
   if (!current) throw new Error('Worker disconnected during tools/list: ' + deviceId);
   const cachedTools = toolListCache.set(current.connectionId, tools);
-  return supportsMcpApps(sourcePayload, sourcePayload)
-    ? addApprovalTestTools(cachedTools)
-    : cachedTools;
+  return includeApproval ? addApprovalTestTools(cachedTools) : cachedTools;
 }
 
 const RESOURCE_METHODS = new Set([
@@ -404,23 +388,17 @@ async function forwardDefaultResource(payload, sourcePayload = null) {
   return callWorker(registry.defaultDeviceId, payload, sourcePayload);
 }
 
-async function routeResource(payload, sourcePayload = null) {
+async function routeResource(payload, sourcePayload = null, { includeApproval = true } = {}) {
   const method = String(payload?.method || '');
-  const uiEnabled = supportsMcpApps(payload, sourcePayload);
-  traceUiCapability(payload, sourcePayload);
-  if (uiEnabled) {
-    const local = localApprovalTestResource(payload);
-    if (local) {
-      const bytes = Buffer.byteLength(local?.result?.contents?.[0]?.text || '', 'utf8');
-      appendRouterTrace('UI', `resource_read uri=${APPROVAL_TEST_UI_URI} bytes=${bytes}`);
-      return local;
-    }
-  } else if (method === 'resources/read' && payload?.params?.uri === APPROVAL_TEST_UI_URI) {
-    return { error: { code: -32602, message: 'MCP Apps capability is required for this resource.' } };
+  const local = includeApproval ? localApprovalTestResource(payload) : null;
+  if (local) {
+    const bytes = Buffer.byteLength(local?.result?.contents?.[0]?.text || '', 'utf8');
+    appendRouterTrace('UI', `resource_read uri=${APPROVAL_TEST_UI_URI} bytes=${bytes}`);
+    return local;
   }
   const message = await forwardDefaultResource(payload, sourcePayload);
   if (message?.error) return message;
-  if (method !== 'resources/list' || !uiEnabled) return message;
+  if (method !== 'resources/list' || !includeApproval) return message;
   appendRouterTrace('UI', `resource_list include=${APPROVAL_TEST_UI_URI}`);
   return mergeApprovalTestResourceList(message);
 }
@@ -452,7 +430,7 @@ function approvalTestFailureState(error) {
   return /timed out|timeout/i.test(text) ? 'execution_unknown' : 'approved_retryable';
 }
 
-async function executeTool(payload, sourcePayload = null) {
+async function executeTool(payload, sourcePayload = null, { allowApproval = true } = {}) {
   const toolName = payload?.params?.name;
   if (toolName === 'list_devices') {
     return toolResult({
@@ -460,13 +438,10 @@ async function executeTool(payload, sourcePayload = null) {
       devices: hub.listStatus(),
     });
   }
-  if (['approval_test_exec', 'request_approval_test', 'resolve_approval_test'].includes(toolName)) {
-    traceUiCapability(payload, sourcePayload);
-    if (!supportsMcpApps(payload, sourcePayload)) {
-      return structuredToolResult({
-        error: 'MCP Apps capability is required for approval-test tools.',
-      }, { isError: true });
-    }
+  if (!allowApproval && ['approval_test_exec', 'request_approval_test', 'resolve_approval_test'].includes(toolName)) {
+    return structuredToolResult({
+      error: 'Approval-test tools are not available on the legacy MCP transport.',
+    }, { isError: true });
   }
   if (toolName === 'approval_test_exec') {
     const args = payload?.params?.arguments || {};
@@ -519,10 +494,10 @@ async function executeTool(payload, sourcePayload = null) {
           args.approval_nonce,
           hostSession,
         );
-        return structuredToolResult({
+        return structuredToolResult(approvalTestStatus({
           ...denied,
           output: 'The user denied the frozen WCM test command. It was not dispatched.',
-        });
+        }));
       }
       if (args.decision !== 'approve') {
         throw new Error('decision must be approve or deny.');
@@ -535,10 +510,10 @@ async function executeTool(payload, sourcePayload = null) {
       const device = getDevice(claimed.action.deviceId);
       if (!device || !hub.connectionInfo(device.deviceId)) {
         const retryable = approvalTestManager.markRetryable(args.approval_id);
-        return structuredToolResult({
+        return structuredToolResult(approvalTestStatus({
           ...retryable,
           output: 'The approved test command was not dispatched because the target worker is offline.',
-        });
+        }));
       }
       const workerPayload = {
         jsonrpc: '2.0',
@@ -557,28 +532,26 @@ async function executeTool(payload, sourcePayload = null) {
         const message = await callWorker(device.deviceId, workerPayload, sourcePayload);
         const consumed = approvalTestManager.markConsumed(args.approval_id);
         if (message.error) {
-          return structuredToolResult({
+          return structuredToolResult(approvalTestStatus({
             ...consumed,
             action_failed: true,
             output: String(message.error?.message || JSON.stringify(message.error)),
-            worker_error: message.error,
-          });
+          }));
         }
         const workerResult = message.result || {};
-        return structuredToolResult({
+        return structuredToolResult(approvalTestStatus({
           ...consumed,
           output: workerToolText(workerResult) || 'Approved test command completed.',
-          worker_result: workerResult,
-        });
+        }));
       } catch (error) {
         const state = approvalTestFailureState(error);
         const transitioned = state === 'execution_unknown'
           ? approvalTestManager.markUnknown(args.approval_id)
           : approvalTestManager.markRetryable(args.approval_id);
-        return structuredToolResult({
+        return structuredToolResult(approvalTestStatus({
           ...transitioned,
           output: String(error?.message || error),
-        });
+        }));
       }
     } catch (error) {
       return structuredToolResult(
@@ -626,10 +599,7 @@ function modernDiscovery(id) {
       supportedVersions: [MODERN_PROTOCOL],
       capabilities: {
         tools: { listChanged: true },
-        resources: {},
-        extensions: {
-          [EXTENSION_ID]: { mimeTypes: [RESOURCE_MIME_TYPE] },
-        },
+        resources: { listChanged: true },
       },
       instructions: `Every Desktop Commander tool requires an explicit deviceId. Ordinary WCM tools route directly to the selected worker and are not blocked by the approval test flow. approval_test_exec is an isolated test-only approval path for one frozen hostname action. Default device: ${registry.defaultDeviceId}.\n\n${SPECIALIZED_CAPABILITIES}\n\n${WCM_ERROR_SEMANTICS}`,
       ttlMs: 5000,
@@ -725,7 +695,7 @@ async function handleLegacy(payload, request, response) {
     return;
   }
   if (RESOURCE_METHODS.has(payload?.method)) {
-    const message = await routeResource(payload, session.initializePayload);
+    const message = await routeResource(payload, session.initializePayload, { includeApproval: false });
     const envelope = message.error
       ? { jsonrpc: '2.0', id: payload.id, error: message.error }
       : { jsonrpc: '2.0', id: payload.id, result: message.result || {} };
@@ -733,14 +703,17 @@ async function handleLegacy(payload, request, response) {
     return;
   }
   if (payload?.method === 'tools/list') {
-    const tools = await listTools(session.initializePayload);
+    const tools = await listTools(session.initializePayload, { includeApproval: false });
     sendSse(response, 200, {
       jsonrpc: '2.0', id: payload.id, result: { tools },
     }, sessionId);
     return;
   }
   if (payload?.method === 'tools/call') {
-    const result = enforceToolResultSize(await executeTool(payload, session.initializePayload), payload);
+    const result = enforceToolResultSize(
+      await executeTool(payload, session.initializePayload, { allowApproval: false }),
+      payload,
+    );
     sendSse(response, 200, {
       jsonrpc: '2.0', id: payload.id, result,
     }, sessionId);

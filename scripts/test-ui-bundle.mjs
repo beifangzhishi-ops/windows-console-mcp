@@ -1,41 +1,47 @@
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import path from 'node:path';
+import {
+  APPROVAL_TEST_UI_HTML,
+  APPROVAL_TEST_UI_URI,
+} from '../router/approval-test-app.mjs';
 
-const bundlePath = path.resolve('ui', 'dist', 'approval-test.html');
-assert.equal(fs.existsSync(bundlePath), true, 'approval-test bundle was not built');
-const html = fs.readFileSync(bundlePath, 'utf8');
-const source = fs.readFileSync(path.resolve('ui', 'approval-test', 'main.ts'), 'utf8');
+const html = APPROVAL_TEST_UI_HTML;
 
-assert.match(html, /WCM approval test/);
-assert.match(html, /Loading MCP App/);
-assert.ok(Buffer.byteLength(html, 'utf8') > 3000, 'approval-test bundle is unexpectedly small');
+assert.match(APPROVAL_TEST_UI_URI, /^ui:\/\/wcm\/approval-test\/[a-f0-9]{16}\.html$/u);
+assert.match(html, /<div id="title">WCM approval<\/div>/);
+assert.match(html, /<script>\s*\(\(\) => \{/);
+assert.doesNotMatch(html, /type=["']module["']/i);
+assert.doesNotMatch(html, /crossorigin/i);
 
-assert.match(source, /window\.parent\.postMessage/);
-assert.match(source, /ui\/initialize/);
-assert.match(source, /ui\/notifications\/initialized/);
-assert.match(source, /ui\/notifications\/tool-result/);
-assert.match(source, /tools\/call/);
-assert.match(source, /ui\/update-model-context/);
-assert.match(source, /toolResponseMetadata/);
-assert.match(source, /window\.openai\?\.toolOutput/);
-assert.match(source, /openai:set_globals/);
-assert.match(source, /notifyIntrinsicHeight/);
-assert.match(source, /sendFollowUpMessage/);
-assert.match(source, /hidden\.approval_nonce/);
+for (const marker of [
+  'const PROTOCOL_VERSION = "2026-01-26"',
+  'window.parent.postMessage',
+  'ui/initialize',
+  'ui/notifications/initialized',
+  'ui/notifications/tool-result',
+  'tools/call',
+  'resolve_approval_test',
+  'ui/update-model-context',
+  'window.openai?.toolResponseMetadata',
+  'window.openai?.toolOutput',
+  'openai:set_globals',
+  'notifyIntrinsicHeight',
+  'sendFollowUpMessage',
+  'hidden.approval_nonce',
+]) {
+  assert.ok(html.includes(marker), `approval HTML is missing CCM parity marker: ${marker}`);
+}
 
-assert.doesNotMatch(source, /import\s+\{\s*App\s*\}\s+from\s+['"]@modelcontextprotocol\/ext-apps['"]/);
-assert.doesNotMatch(source, /new App\(/);
-assert.doesNotMatch(source, /app\.connect\(/);
-assert.doesNotMatch(source, /app\.callServerTool/);
+assert.doesNotMatch(html, /@modelcontextprotocol\/ext-apps/);
+assert.doesNotMatch(html, /new App\(/);
+assert.doesNotMatch(html, /app\.connect\(/);
+assert.doesNotMatch(html, /callServerTool/);
+assert.doesNotMatch(html, /CCM|ccm/);
 
-assert.doesNotMatch(html, /<script[^>]*type=["']module["']/i);
-assert.doesNotMatch(html, /<script[^>]*crossorigin/i);
-const bodyIndex = html.indexOf('<body');
+const bodyIndex = html.indexOf('<body>');
 const cardIndex = html.indexOf('id="card"');
 const scriptIndex = html.indexOf('<script>');
-assert.ok(bodyIndex >= 0 && cardIndex > bodyIndex, 'approval card DOM is missing from body');
-assert.ok(scriptIndex > cardIndex, 'classic approval script must execute after the card DOM exists');
-assert.equal((html.match(/<script>/g) || []).length, 1, 'bundle must contain exactly one classic script');
+assert.ok(bodyIndex >= 0 && cardIndex > bodyIndex);
+assert.ok(scriptIndex > cardIndex, 'approval bridge must execute after the card DOM');
+assert.equal((html.match(/<script>/g) || []).length, 1);
 
-console.log('WCM MCP App bridge bundle checks: PASS');
+console.log('WCM CCM-parity approval View checks: PASS');

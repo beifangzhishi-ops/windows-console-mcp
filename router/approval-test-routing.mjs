@@ -2,7 +2,9 @@ import {
   APPROVAL_TEST_UI_HTML,
   APPROVAL_TEST_UI_URI,
 } from './approval-test-app.mjs';
-import { RESOURCE_MIME_TYPE } from '@modelcontextprotocol/ext-apps/server';
+
+const RESOURCE_MIME_TYPE = 'text/html;profile=mcp-app';
+const UUID_PATTERN = '^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$';
 
 function approvalTestOutputSchema() {
   return {
@@ -11,11 +13,14 @@ function approvalTestOutputSchema() {
       approval_required: { type: 'boolean' },
       approval_id: { type: 'string' },
       operation_id: { type: 'string' },
+      wall_time_seconds: { type: 'number' },
+      kind: { type: 'string', enum: ['execution'] },
       state: {
         type: 'string',
         enum: ['pending', 'dispatching', 'approved_retryable', 'execution_unknown', 'denied', 'consumed'],
       },
       device_id: { type: 'string' },
+      environment_id: { type: 'string' },
       command: { type: 'string' },
       shell: { type: ['string', 'null'] },
       timeout_ms: { type: 'number' },
@@ -25,7 +30,9 @@ function approvalTestOutputSchema() {
       action_failed: { type: 'boolean' },
       output: { type: 'string' },
     },
-    additionalProperties: true,
+    required: ['wall_time_seconds', 'output'],
+    $schema: 'http://json-schema.org/draft-07/schema#',
+    additionalProperties: false,
   };
 }
 
@@ -43,6 +50,7 @@ export function approvalTestRouterTools(deviceSchema) {
         destructiveHint: false,
         openWorldHint: false,
       },
+      execution: { taskSupport: 'forbidden' },
       inputSchema: {
         type: 'object',
         properties: {
@@ -68,6 +76,7 @@ export function approvalTestRouterTools(deviceSchema) {
         destructiveHint: false,
         openWorldHint: false,
       },
+      execution: { taskSupport: 'forbidden' },
       _meta: {
         ui: { resourceUri: APPROVAL_TEST_UI_URI, visibility: ['model', 'app'] },
         'ui/resourceUri': APPROVAL_TEST_UI_URI,
@@ -77,10 +86,15 @@ export function approvalTestRouterTools(deviceSchema) {
       inputSchema: {
         type: 'object',
         properties: {
-          approval_id: { type: 'string', format: 'uuid' },
+          approval_id: {
+            type: 'string',
+            format: 'uuid',
+            pattern: UUID_PATTERN,
+            description: 'Opaque pending approval id returned by WCM.',
+          },
         },
         required: ['approval_id'],
-        additionalProperties: false,
+        $schema: 'http://json-schema.org/draft-07/schema#',
       },
       outputSchema: approvalTestOutputSchema(),
     },
@@ -92,6 +106,7 @@ export function approvalTestRouterTools(deviceSchema) {
         destructiveHint: true,
         openWorldHint: true,
       },
+      execution: { taskSupport: 'forbidden' },
       _meta: {
         ui: { visibility: ['app'] },
         'openai/widgetAccessible': true,
@@ -99,12 +114,25 @@ export function approvalTestRouterTools(deviceSchema) {
       inputSchema: {
         type: 'object',
         properties: {
-          approval_id: { type: 'string', format: 'uuid' },
-          approval_nonce: { type: 'string', minLength: 20 },
-          decision: { type: 'string', enum: ['approve', 'deny'] },
+          approval_id: {
+            type: 'string',
+            format: 'uuid',
+            pattern: UUID_PATTERN,
+            description: 'Frozen WCM approval identifier.',
+          },
+          approval_nonce: {
+            type: 'string',
+            minLength: 20,
+            description: 'One-time card secret delivered only through tool-result _meta.',
+          },
+          decision: {
+            type: 'string',
+            enum: ['approve', 'deny'],
+            description: 'User decision from the WCM approval card.',
+          },
         },
         required: ['approval_id', 'approval_nonce', 'decision'],
-        additionalProperties: false,
+        $schema: 'http://json-schema.org/draft-07/schema#',
       },
       outputSchema: approvalTestOutputSchema(),
     },
@@ -118,7 +146,6 @@ export function approvalTestResource() {
     title: 'WCM approval test',
     description: 'Test card for one frozen WCM command.',
     mimeType: RESOURCE_MIME_TYPE,
-    _meta: { ui: { prefersBorder: true } },
   };
 }
 

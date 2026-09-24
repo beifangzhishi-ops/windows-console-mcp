@@ -1,5 +1,4 @@
 import fs from 'node:fs';
-import { EXTENSION_ID, RESOURCE_MIME_TYPE } from '@modelcontextprotocol/ext-apps/server';
 import { APPROVAL_TEST_UI_URI } from '../router/approval-test-routing.mjs';
 import { loadConfig } from '../rdc-sidecar/config.mjs';
 import { createPkceChallenge } from '../rdc-sidecar/oauth.mjs';
@@ -8,11 +7,6 @@ const config = loadConfig(process.cwd());
 const baseUrl = process.env.RDC_E2E_BASE_URL || `http://${config.host}:${config.port}`;
 const redirectUri = 'http://127.0.0.1:19002/rdc-modern-e2e-callback';
 const protocol = '2026-07-28';
-const clientCapabilities = {
-  extensions: {
-    [EXTENSION_ID]: { mimeTypes: [RESOURCE_MIME_TYPE] },
-  },
-};
 let stage = 'startup';
 
 async function request(path, options = {}) {
@@ -105,21 +99,12 @@ function modernHeaders(accessToken) {
     'Content-Type': 'application/json',
     'MCP-Protocol-Version': protocol,
   };
-}async function mcp(accessToken, id, method, params = {}, { ui = true } = {}) {
+}async function mcp(accessToken, id, method, params = {}) {
   stage = method;
-  const requestParams = ui
-    ? {
-        ...params,
-        _meta: {
-          ...(params?._meta || {}),
-          'io.modelcontextprotocol/clientCapabilities': clientCapabilities,
-        },
-      }
-    : params;
   const result = await request('/rdc/mcp', {
     method: 'POST',
     headers: modernHeaders(accessToken),
-    body: JSON.stringify({ jsonrpc: '2.0', id, method, params: requestParams }),
+    body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
   });
   requireStatus(result, 200);
   if (!result.json || result.json.error) {
@@ -141,16 +126,18 @@ async function runModern(approvalSecret) {
     throw new Error('server/discover did not advertise tools.listChanged=true.');
   }
   if (!discover?.capabilities?.resources) throw new Error('server/discover did not advertise resources.');
-  const uiExtension = discover?.capabilities?.extensions?.[EXTENSION_ID];
-  if (!uiExtension?.mimeTypes?.includes(RESOURCE_MIME_TYPE)) {
-    throw new Error('server/discover did not advertise the MCP Apps extension.');
+  if (discover?.capabilities?.resources?.listChanged !== true) {
+    throw new Error('server/discover did not match CCM resources.listChanged=true.');
+  }
+  if (discover?.capabilities?.extensions) {
+    throw new Error('server/discover exposed a WCM-only extensions capability instead of the CCM host surface.');
   }
   if (!discover?.instructions?.includes('network connectivity can be transiently unstable')) {
     throw new Error('server/discover did not advertise transient network error semantics.');
   }
-  const textOnlyTools = await mcp(accessToken, 2, 'tools/list', {}, { ui: false });
-  if (textOnlyTools?.tools?.some((tool) => tool?.name === 'approval_test_exec')) {
-    throw new Error('text-only modern client was exposed to approval-test tools.');
+  const noCapabilityTools = await mcp(accessToken, 2, 'tools/list', {});
+  if (!noCapabilityTools?.tools?.some((tool) => tool?.name === 'approval_test_exec')) {
+    throw new Error('modern tools/list without extra UI capability metadata did not expose approval-test tools like CCM.');
   }
   const toolsResult = await mcp(accessToken, 3, 'tools/list', {});
   const tools = toolsResult?.tools;
@@ -193,6 +180,18 @@ async function runModern(approvalSecret) {
   if (resolveApprovalTestTool._meta?.['openai/widgetAccessible'] !== true) {
     throw new Error('resolve_approval_test did not expose ChatGPT app accessibility metadata.');
   }
+  if (requestApprovalTestTool.execution?.taskSupport !== 'forbidden' ||
+      resolveApprovalTestTool.execution?.taskSupport !== 'forbidden') {
+    throw new Error('approval tools did not match CCM taskSupport=forbidden.');
+  }
+  if (requestApprovalTestTool.inputSchema?.$schema !== 'http://json-schema.org/draft-07/schema#' ||
+      resolveApprovalTestTool.inputSchema?.$schema !== 'http://json-schema.org/draft-07/schema#') {
+    throw new Error('approval tool input schemas did not match CCM draft-07 wire shape.');
+  }
+  if (requestApprovalTestTool.inputSchema?.additionalProperties !== undefined ||
+      resolveApprovalTestTool.inputSchema?.additionalProperties !== undefined) {
+    throw new Error('approval tool input schemas exposed constraints absent from the live CCM wire shape.');
+  }
   for (const name of ['read_file', 'edit_block']) {
     const tool = tools.find((candidate) => candidate?.name === name);
     if (!tool) throw new Error(`${name} was not listed.`);
@@ -224,6 +223,14 @@ async function runModern(approvalSecret) {
       frozenRequest?.structuredContent?.approval_required !== true) {
     throw new Error('approval_test_exec did not return a frozen pending action.');
   }
+  if (!String(frozenRequest?.structuredContent?.output || '').trim()) {
+    throw new Error('approval_test_exec did not return the required status output.');
+  }
+  if (frozenRequest?.structuredContent?.wall_time_seconds !== 0 ||
+      frozenRequest?.structuredContent?.kind !== 'execution' ||
+      frozenRequest?.structuredContent?.environment_id !== targetDeviceId) {
+    throw new Error('approval_test_exec did not return the CCM-shaped execution status envelope.');
+  }
   if (frozenRequest?._meta?.approval_nonce) {
     throw new Error('approval_test_exec generated an approval nonce before card presentation.');
   }
@@ -235,6 +242,11 @@ async function runModern(approvalSecret) {
   const approvalNonce = cardRequest?._meta?.approval_nonce;
   if (!approvalNonce || cardRequest?.structuredContent?.approval_id !== approvalId) {
     throw new Error('request_approval_test did not bind the frozen action to an approval card.');
+  }
+  if (cardRequest?._meta?.source !== 'wcm.approval' ||
+      cardRequest?.structuredContent?.wall_time_seconds !== 0 ||
+      cardRequest?.structuredContent?.kind !== 'execution') {
+    throw new Error('request_approval_test did not match the CCM approval-card result envelope.');
   }
   if (Object.hasOwn(cardRequest?.structuredContent || {}, 'approval_nonce')) {
     throw new Error('request_approval_test leaked approval_nonce into structuredContent.');
@@ -286,6 +298,10 @@ async function runModern(approvalSecret) {
   if (!resources.some((item) => item?.uri === approvalTestUiUri)) {
     throw new Error('resources/list did not include WCM approval test UI.');
   }
+  const approvalResourceDescriptor = resources.find((item) => item?.uri === approvalTestUiUri);
+  if (approvalResourceDescriptor?._meta) {
+    throw new Error('resources/list approval descriptor exposed metadata absent from the live CCM descriptor.');
+  }
   const resourceRead = await mcp(accessToken, 11, 'resources/read', { uri: filePreviewUri });
   const html = resourceRead?.contents?.[0]?.text || '';
   if (!html.includes('<html') && !html.includes('<!DOCTYPE html')) {
@@ -293,7 +309,9 @@ async function runModern(approvalSecret) {
   }
   const approvalTestUi = await mcp(accessToken, 12, 'resources/read', { uri: approvalTestUiUri });
   const approvalTestHtml = approvalTestUi?.contents?.[0]?.text || '';
-  if (!approvalTestHtml.includes('WCM approval test')) {
+  if (!approvalTestHtml.includes('<div id="title">WCM approval</div>') ||
+      !approvalTestHtml.includes('const PROTOCOL_VERSION = "2026-01-26"') ||
+      !approvalTestHtml.includes('name: "resolve_approval_test"')) {
     throw new Error('resources/read did not return WCM approval test HTML.');
   }
   if (approvalTestUi?.contents?.[0]?._meta?.ui?.prefersBorder !== true) {
