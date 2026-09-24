@@ -71,12 +71,9 @@ const expiring = manager.request({ deviceId: 'device-a' });
 now = Date.parse(expiring.expires_at);
 assert.throws(() => manager.prepareAppApproval(expiring.approval_id), /Unknown or expired approval_id/);
 
-assert.equal(APPROVAL_TEST_UI_URI, 'ui://wcm/approval-test-v1.html');
-assert.match(APPROVAL_TEST_UI_HTML, /ui\/initialize/);
-assert.match(APPROVAL_TEST_UI_HTML, /toolResponseMetadata/);
-assert.match(APPROVAL_TEST_UI_HTML, /resolve_approval_test/);
-assert.match(APPROVAL_TEST_UI_HTML, /ui\/update-model-context/);
-assert.match(APPROVAL_TEST_UI_HTML, /sendFollowUpMessage/);
+assert.match(APPROVAL_TEST_UI_URI, /^ui:\/\/wcm\/approval-test\/[a-f0-9]{16}\.html$/u);
+assert.match(APPROVAL_TEST_UI_HTML, /WCM approval test/);
+assert.match(APPROVAL_TEST_UI_HTML, /Loading MCP App/);
 assert.ok(audit.some((event) => event.event === 'requested'));
 assert.ok(audit.some((event) => event.event === 'app_bound'));
 assert.ok(audit.some((event) => event.event === 'consumed'));

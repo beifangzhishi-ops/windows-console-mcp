@@ -183,32 +183,20 @@ async function runRound(round, approvalSecret) {
     if (!tool) {
       throw new Error('Expected Desktop Commander tool was not listed: ' + name);
     }
-    if (!tool.inputSchema?.required?.includes('deviceId') ||
-        !tool.inputSchema?.required?.includes('permissionId')) {
-      throw new Error('Routed tool does not require deviceId + permissionId: ' + name);
+    if (!tool.inputSchema?.required?.includes('deviceId')) {
+      throw new Error('Routed tool does not require deviceId: ' + name);
     }
   }
   const approvalTestExecTool = toolList.find((tool) => tool.name === 'approval_test_exec');
   const requestApprovalTestTool = toolList.find((tool) => tool.name === 'request_approval_test');
   const resolveApprovalTestTool = toolList.find((tool) => tool.name === 'resolve_approval_test');
-  if (!approvalTestExecTool || !requestApprovalTestTool || !resolveApprovalTestTool) {
-    throw new Error('Approval test tools were not listed.');
-  }
-  if (approvalTestExecTool._meta) {
-    throw new Error('approval_test_exec must not expose approval-card metadata.');
-  }
-  if (requestApprovalTestTool?._meta?.['openai/outputTemplate'] !==
-      'ui://wcm/approval-test-v1.html') {
-    throw new Error('request_approval_test did not expose the WCM approval test card.');
-  }
-  if (resolveApprovalTestTool?._meta?.ui?.visibility?.join(',') !== 'app') {
-    throw new Error('resolve_approval_test is not app-only.');
+  if (approvalTestExecTool || requestApprovalTestTool || resolveApprovalTestTool) {
+    throw new Error('Legacy client was exposed to MCP Apps approval tools.');
   }
   const screenshotTool = { name: 'not-applicable' };
-  const safeToolName = 'approval_test_exec';
+  const safeToolName = 'get_config';
 
   const filePreviewUri = 'ui://desktop-commander/file-preview';
-  const approvalTestUiUri = 'ui://wcm/approval-test-v1.html';
   stage = stagePrefix + 'resources/list through upstream';
   const resourcesResponse = await request('/rdc/mcp', {
     method: 'POST',
@@ -220,8 +208,8 @@ async function runRound(round, approvalSecret) {
   if (!Array.isArray(resources) || !resources.some((item) => item?.uri === filePreviewUri)) {
     throw new Error('Legacy resources/list did not include file preview UI.');
   }
-  if (!resources.some((item) => item?.uri === approvalTestUiUri)) {
-    throw new Error('Legacy resources/list did not include WCM approval test UI.');
+  if (resources.some((item) => String(item?.uri || '').startsWith('ui://wcm/approval-test/'))) {
+    throw new Error('Legacy resources/list exposed the WCM approval test UI.');
   }
 
   stage = stagePrefix + 'resources/read through upstream';
@@ -255,82 +243,7 @@ async function runRound(round, approvalSecret) {
   const targetDeviceId = deviceInfo?.defaultDeviceId || deviceInfo?.devices?.find((item) => item?.online)?.deviceId;
   if (!targetDeviceId) throw new Error('No online/default device was available.');
 
-  stage = stagePrefix + 'approval test freeze';
-  const approvalTestRequest = await request('/rdc/mcp', {
-    method: 'POST',
-    headers: { ...mcpHeaders, 'Mcp-Session-Id': sessionId },
-    body: JSON.stringify({
-      jsonrpc: '2.0',
-      id: round * 100 + 7,
-      method: 'tools/call',
-      params: {
-        name: 'approval_test_exec',
-        arguments: {
-          deviceId: targetDeviceId,
-          justification: 'RDC legacy E2E approval test.',
-        },
-      },
-    }),
-  });
-  requireStatus(approvalTestRequest, 200);
-  const approvalTestRequestResult = parseSse(approvalTestRequest.text).result;
-  const approvalId = approvalTestRequestResult?.structuredContent?.approval_id;
-  if (!approvalId || approvalTestRequestResult?.structuredContent?.approval_required !== true) {
-    throw new Error('approval_test_exec did not return a frozen pending action.');
-  }
-  if (approvalTestRequestResult?._meta?.approval_nonce) {
-    throw new Error('approval_test_exec generated a nonce before card presentation.');
-  }
-
-  stage = stagePrefix + 'approval test card';
-  const approvalCard = await request('/rdc/mcp', {
-    method: 'POST',
-    headers: { ...mcpHeaders, 'Mcp-Session-Id': sessionId },
-    body: JSON.stringify({
-      jsonrpc: '2.0',
-      id: round * 100 + 8,
-      method: 'tools/call',
-      params: {
-        name: 'request_approval_test',
-        arguments: { approval_id: approvalId },
-        _meta: { 'openai/session': 'wcm-legacy-e2e-session' },
-      },
-    }),
-  });
-  requireStatus(approvalCard, 200);
-  const approvalCardResult = parseSse(approvalCard.text).result;
-  const approvalNonce = approvalCardResult?._meta?.approval_nonce;
-  if (!approvalNonce || approvalCardResult?.structuredContent?.approval_id !== approvalId) {
-    throw new Error('request_approval_test did not bind the frozen action to a card.');
-  }
-
-  stage = stagePrefix + 'approval test execution';
-  const approvalExecution = await request('/rdc/mcp', {
-    method: 'POST',
-    headers: { ...mcpHeaders, 'Mcp-Session-Id': sessionId },
-    body: JSON.stringify({
-      jsonrpc: '2.0',
-      id: round * 10 + 3,
-      method: 'tools/call',
-      params: {
-        name: 'resolve_approval_test',
-        arguments: {
-          approval_id: approvalId,
-          approval_nonce: approvalNonce,
-          decision: 'approve',
-        },
-        _meta: { 'openai/session': 'wcm-legacy-e2e-session' },
-      },
-    }),
-  });
-  requireStatus(approvalExecution, 200);
-  const approvalExecutionResult = parseSse(approvalExecution.text).result;
-  if (approvalExecutionResult?.structuredContent?.state !== 'consumed' ||
-      !String(approvalExecutionResult?.structuredContent?.output || '').trim()) {
-    throw new Error('Approval test did not execute the frozen command.');
-  }
-
-  stage = stagePrefix + 'ordinary permission boundary';
+  stage = stagePrefix + 'ordinary direct routing';
   const ordinaryTool = await request('/rdc/mcp', {
     method: 'POST',
     headers: { ...mcpHeaders, 'Mcp-Session-Id': sessionId },
@@ -340,15 +253,14 @@ async function runRound(round, approvalSecret) {
       method: 'tools/call',
       params: {
         name: 'get_config',
-        arguments: { deviceId: targetDeviceId, permissionId: 'not-an-active-permission' },
+        arguments: { deviceId: targetDeviceId },
       },
     }),
   });
   requireStatus(ordinaryTool, 200);
   const ordinaryToolResult = parseSse(ordinaryTool.text).result;
-  if (ordinaryToolResult?.isError !== true ||
-      !JSON.stringify(ordinaryToolResult).includes('issuance is currently disabled')) {
-    throw new Error('Ordinary routed tool did not retain its existing permission boundary.');
+  if (ordinaryToolResult?.isError === true || !Array.isArray(ordinaryToolResult?.content)) {
+    throw new Error('Ordinary routed tool did not execute directly.');
   }
 
   stage = stagePrefix + 'MCP session cleanup';
@@ -410,7 +322,7 @@ async function main() {
   console.log('bearer_initialize_status=200');
   console.log('tools_count=' + roundTwo.toolCount);
   console.log('required_tools=get_config,read_file,start_process');
-  console.log('approval_test_tool=' + roundTwo.safeToolName + ' status=200');
+  console.log('ordinary_direct_tool=' + roundTwo.safeToolName + ' status=200');
   console.log('revoke_status=200');
   console.log('revoked_bearer_status=401');
 }

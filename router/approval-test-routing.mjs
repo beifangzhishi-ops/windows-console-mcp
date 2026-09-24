@@ -2,6 +2,7 @@ import {
   APPROVAL_TEST_UI_HTML,
   APPROVAL_TEST_UI_URI,
 } from './approval-test-app.mjs';
+import { RESOURCE_MIME_TYPE } from '@modelcontextprotocol/ext-apps/server';
 
 function approvalTestOutputSchema() {
   return {
@@ -69,9 +70,6 @@ export function approvalTestRouterTools(deviceSchema) {
       },
       _meta: {
         ui: { resourceUri: APPROVAL_TEST_UI_URI, visibility: ['model', 'app'] },
-        'ui/resourceUri': APPROVAL_TEST_UI_URI,
-        'openai/outputTemplate': APPROVAL_TEST_UI_URI,
-        'openai/widgetAccessible': true,
       },
       inputSchema: {
         type: 'object',
@@ -93,7 +91,6 @@ export function approvalTestRouterTools(deviceSchema) {
       },
       _meta: {
         ui: { visibility: ['app'] },
-        'openai/widgetAccessible': true,
       },
       inputSchema: {
         type: 'object',
@@ -116,7 +113,8 @@ export function approvalTestResource() {
     name: 'wcm-approval-test-ui',
     title: 'WCM approval test',
     description: 'Test card for one frozen WCM command.',
-    mimeType: 'text/html;profile=mcp-app',
+    mimeType: RESOURCE_MIME_TYPE,
+    _meta: { ui: { prefersBorder: true } },
   };
 }
 
@@ -128,7 +126,7 @@ export function localApprovalTestResource(payload) {
     result: {
       contents: [{
         uri: APPROVAL_TEST_UI_URI,
-        mimeType: 'text/html;profile=mcp-app',
+        mimeType: RESOURCE_MIME_TYPE,
         text: APPROVAL_TEST_UI_HTML,
         _meta: { ui: { prefersBorder: true } },
       }],

@@ -2,6 +2,11 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import {
+  EXTENSION_ID,
+  RESOURCE_MIME_TYPE,
+  getUiCapability,
+} from '@modelcontextprotocol/ext-apps/server';
 import { loadDeviceRegistry } from './devices.mjs';
 import { WorkerHub } from './worker-hub.mjs';
 import {
@@ -12,14 +17,13 @@ import {
 import { guardRouterToolResult, resolveMaxRouterToolResultBytes } from './response-guard.mjs';
 import { ConnectionScopedToolListCache } from './tool-list-cache.mjs';
 import { routerClientInfo, serverInfo } from './server-info.mjs';
-import { TemporaryPermissionManager } from './temporary-permissions.mjs';
 import {
-  stripTemporaryPermissionRoutingArguments,
-  temporaryPermissionRouterTools,
-  withTemporaryPermissionRoutingSchema,
-} from './temporary-permission-routing.mjs';
+  stripDeviceRoutingArguments,
+  withDeviceRoutingSchema,
+} from './device-routing.mjs';
 import { ApprovalTestManager } from './approval-test-manager.mjs';
 import {
+  APPROVAL_TEST_UI_URI,
   approvalTestRouterTools,
   localApprovalTestResource,
   mergeApprovalTestResourceList,
@@ -37,11 +41,6 @@ const LEGACY_PROTOCOL = '2025-06-18';
 const MAX_BODY_BYTES = 1024 * 1024;
 const MAX_TOOL_RESULT_BYTES = resolveMaxRouterToolResultBytes(process.env.WC_MAX_TOOL_RESULT_BYTES);
 const ROUTER_TRACE_FILE = path.resolve(process.cwd(), 'logs', 'router-trace.log');
-const TEMP_PERMISSION_STATE_FILE = path.resolve(
-  process.cwd(),
-  '.state',
-  'wcm-temporary-permissions.json',
-);
 const registry = loadDeviceRegistry(process.cwd());
 const SPECIALIZED_CAPABILITIES = [
   'Bundled specialized capabilities (discoverability only; these are helper workflows, not standalone MCP actions):',
@@ -58,10 +57,6 @@ const routerLogger = {
   log: (...values) => appendRouterTrace('INFO', values.map(String).join(' ')),
   error: (...values) => appendRouterTrace('ERROR', values.map(String).join(' ')),
 };
-const permissionManager = new TemporaryPermissionManager({
-  stateFile: TEMP_PERMISSION_STATE_FILE,
-  audit: (event) => appendRouterTrace('AUDIT', JSON.stringify(event)),
-});
 const approvalTestManager = new ApprovalTestManager({
   audit: (event) => appendRouterTrace('AUDIT', JSON.stringify(event)),
 });
@@ -83,6 +78,27 @@ function enabledDevices() {
 
 function getDevice(deviceId) {
   return registry.get(deviceId);
+}
+
+function clientCapabilitiesFor(payload, sourcePayload = null) {
+  const direct = payload?.params?._meta?.['io.modelcontextprotocol/clientCapabilities'];
+  if (direct && typeof direct === 'object') return direct;
+  const source = sourcePayload?.params?._meta?.['io.modelcontextprotocol/clientCapabilities'];
+  return source && typeof source === 'object' ? source : null;
+}
+
+function supportsMcpApps(payload, sourcePayload = null) {
+  const ui = getUiCapability(clientCapabilitiesFor(payload, sourcePayload));
+  return Boolean(ui?.mimeTypes?.includes(RESOURCE_MIME_TYPE));
+}
+
+function traceUiCapability(payload, sourcePayload = null) {
+  const ui = getUiCapability(clientCapabilitiesFor(payload, sourcePayload));
+  const mimeTypes = Array.isArray(ui?.mimeTypes) ? ui.mimeTypes.join(',') : '-';
+  appendRouterTrace(
+    'UI',
+    `method=${String(payload?.method || '-')} enabled=${supportsMcpApps(payload, sourcePayload)} mimeTypes=${mimeTypes}`,
+  );
 }
 function sendJson(response, status, body, headers = {}) {
   const text = JSON.stringify(body);
@@ -228,21 +244,14 @@ function mapPathArguments(value, device) {
 
 function stripToolUiMetadata(tool) {
   const copy = { ...tool };
-  if (!copy._meta || typeof copy._meta !== 'object') return copy;
-  const meta = structuredClone(copy._meta);
-  delete meta['openai/outputTemplate'];
-  delete meta['ui/resourceUri'];
-  delete meta.ui;
-  delete meta['openai/widgetAccessible'];
-  if (Object.keys(meta).length > 0) copy._meta = meta;
-  else delete copy._meta;
+  delete copy._meta;
   return copy;
 }
 
 function augmentTools(tools) {
   const routed = tools.map((tool) => {
     const baseTool = stripToolUiMetadata(tool);
-    const inputSchema = withTemporaryPermissionRoutingSchema(
+    const inputSchema = withDeviceRoutingSchema(
       baseTool?.inputSchema,
       toolDeviceSchema(),
     );
@@ -272,10 +281,16 @@ function augmentTools(tools) {
       description: `List Windows Console devices and their online status.\n\n${SPECIALIZED_CAPABILITIES}\n\n${WCM_ERROR_SEMANTICS}`,
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     },
-    ...approvalTestRouterTools(toolDeviceSchema()),
-    ...temporaryPermissionRouterTools(toolDeviceSchema()),
     ...plainAliases,
     ...routed,
+  ];
+}
+
+function addApprovalTestTools(tools) {
+  return [
+    tools[0],
+    ...approvalTestRouterTools(toolDeviceSchema()),
+    ...tools.slice(1),
   ];
 }
 
@@ -355,7 +370,11 @@ async function listTools(sourcePayload = null) {
   const connection = hub.connectionInfo(deviceId);
   if (!connection) throw new Error('Worker is offline: ' + deviceId);
   const cached = toolListCache.get(connection.connectionId);
-  if (cached) return cached;
+  if (cached) {
+    return supportsMcpApps(sourcePayload, sourcePayload)
+      ? addApprovalTestTools(cached)
+      : cached;
+  }
   const payload = {
     jsonrpc: '2.0',
     id: 'worker-tools-' + randomUUID(),
@@ -369,7 +388,10 @@ async function listTools(sourcePayload = null) {
   const tools = augmentTools(message.result.tools);
   const current = hub.connectionInfo(deviceId);
   if (!current) throw new Error('Worker disconnected during tools/list: ' + deviceId);
-  return toolListCache.set(current.connectionId, tools);
+  const cachedTools = toolListCache.set(current.connectionId, tools);
+  return supportsMcpApps(sourcePayload, sourcePayload)
+    ? addApprovalTestTools(cachedTools)
+    : cachedTools;
 }
 
 const RESOURCE_METHODS = new Set([
@@ -384,11 +406,22 @@ async function forwardDefaultResource(payload, sourcePayload = null) {
 
 async function routeResource(payload, sourcePayload = null) {
   const method = String(payload?.method || '');
-  const local = localApprovalTestResource(payload);
-  if (local) return local;
+  const uiEnabled = supportsMcpApps(payload, sourcePayload);
+  traceUiCapability(payload, sourcePayload);
+  if (uiEnabled) {
+    const local = localApprovalTestResource(payload);
+    if (local) {
+      const bytes = Buffer.byteLength(local?.result?.contents?.[0]?.text || '', 'utf8');
+      appendRouterTrace('UI', `resource_read uri=${APPROVAL_TEST_UI_URI} bytes=${bytes}`);
+      return local;
+    }
+  } else if (method === 'resources/read' && payload?.params?.uri === APPROVAL_TEST_UI_URI) {
+    return { error: { code: -32602, message: 'MCP Apps capability is required for this resource.' } };
+  }
   const message = await forwardDefaultResource(payload, sourcePayload);
   if (message?.error) return message;
-  if (method !== 'resources/list') return message;
+  if (method !== 'resources/list' || !uiEnabled) return message;
+  appendRouterTrace('UI', `resource_list include=${APPROVAL_TEST_UI_URI}`);
   return mergeApprovalTestResourceList(message);
 }
 
@@ -426,6 +459,14 @@ async function executeTool(payload, sourcePayload = null) {
       defaultDeviceId: registry.defaultDeviceId,
       devices: hub.listStatus(),
     });
+  }
+  if (['approval_test_exec', 'request_approval_test', 'resolve_approval_test'].includes(toolName)) {
+    traceUiCapability(payload, sourcePayload);
+    if (!supportsMcpApps(payload, sourcePayload)) {
+      return structuredToolResult({
+        error: 'MCP Apps capability is required for approval-test tools.',
+      }, { isError: true });
+    }
   }
   if (toolName === 'approval_test_exec') {
     const args = payload?.params?.arguments || {};
@@ -546,44 +587,15 @@ async function executeTool(payload, sourcePayload = null) {
       );
     }
   }
-  if (toolName === 'temporary_permission_status') {
-    const args = payload?.params?.arguments || {};
-    return structuredToolResult(permissionManager.status({
-      permissionId: args.permissionId,
-      deviceId: args.deviceId,
-    }));
-  }
-  if (toolName === 'revoke_temporary_permission') {
-    const args = payload?.params?.arguments || {};
-    return structuredToolResult(permissionManager.revoke({
-      permissionId: args.permissionId,
-      deviceId: args.deviceId,
-    }));
-  }
   const { args, deviceId, device } = selectedToolDevice(payload);
   if (!device) {
     const detail = deviceId ? 'Unknown or disabled deviceId: ' + deviceId : 'deviceId is required.';
     return toolResult({ error: detail, devices: hub.listStatus() }, true);
   }
-  const permission = permissionManager.validate({
-    permissionId: args?.permissionId,
-    deviceId: device.deviceId,
-  });
-  if (!permission.ok) {
-    return structuredToolResult({
-      error: 'A valid temporary permission is required for this device.',
-      permission_state: permission.state,
-      device_id: device.deviceId,
-      action: 'New temporary permission issuance is currently disabled. Use an existing active permissionId.',
-    }, {
-      isError: true,
-      context: { deviceOnline: Boolean(hub.connectionInfo(device.deviceId)) },
-    });
-  }
   const forwarded = stripModernMeta(payload);
   forwarded.params = { ...(forwarded.params || {}) };
   if (forwarded.params.name === 'read_file_plain') forwarded.params.name = 'read_file';
-  forwarded.params.arguments = stripTemporaryPermissionRoutingArguments(args);
+  forwarded.params.arguments = stripDeviceRoutingArguments(args);
   forwarded.params.arguments = mapPathArguments(forwarded.params.arguments, device);
   try {
     const message = await callWorker(device.deviceId, forwarded, sourcePayload);
@@ -612,8 +624,14 @@ function modernDiscovery(id) {
     id,
     result: modernResult({
       supportedVersions: [MODERN_PROTOCOL],
-      capabilities: { tools: { listChanged: true }, resources: {} },
-      instructions: `Every Desktop Commander tool requires an explicit deviceId and an existing active temporary permissionId. New temporary permission issuance is currently disabled. approval_test_exec is an isolated test-only approval path that can execute one frozen test command after approval; it does not grant a permissionId and does not change ordinary WCM tool access. Default device: ${registry.defaultDeviceId}.\n\n${SPECIALIZED_CAPABILITIES}\n\n${WCM_ERROR_SEMANTICS}`,
+      capabilities: {
+        tools: { listChanged: true },
+        resources: {},
+        extensions: {
+          [EXTENSION_ID]: { mimeTypes: [RESOURCE_MIME_TYPE] },
+        },
+      },
+      instructions: `Every Desktop Commander tool requires an explicit deviceId. Ordinary WCM tools route directly to the selected worker and are not blocked by the approval test flow. approval_test_exec is an isolated test-only approval path for one frozen hostname action. Default device: ${registry.defaultDeviceId}.\n\n${SPECIALIZED_CAPABILITIES}\n\n${WCM_ERROR_SEMANTICS}`,
       ttlMs: 5000,
       cacheScope: 'private',
     }),
@@ -679,7 +697,7 @@ function legacyInitializeResult(payload) {
       protocolVersion: LEGACY_PROTOCOL,
       capabilities: { tools: { listChanged: true }, resources: {} },
       serverInfo,
-      instructions: `Every Desktop Commander tool requires an explicit deviceId and an existing active temporary permissionId. New temporary permission issuance is currently disabled. approval_test_exec is an isolated test-only approval path that can execute one frozen test command after approval; it does not grant a permissionId and does not change ordinary WCM tool access. Default device: ${registry.defaultDeviceId}.\n\n${SPECIALIZED_CAPABILITIES}\n\n${WCM_ERROR_SEMANTICS}`,
+      instructions: `Every Desktop Commander tool requires an explicit deviceId. Ordinary WCM tools route directly to the selected worker and are not blocked by the approval test flow. approval_test_exec is an isolated test-only approval path for one frozen hostname action. Default device: ${registry.defaultDeviceId}.\n\n${SPECIALIZED_CAPABILITIES}\n\n${WCM_ERROR_SEMANTICS}`,
     },
   };
 }

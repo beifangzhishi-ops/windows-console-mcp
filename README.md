@@ -2,7 +2,7 @@
 
 Self-hosted multi-device Windows MCP controller for ChatGPT.
 
-One controller owns the public OAuth/Funnel endpoint. Local and remote workers expose Desktop Commander through the controller with an explicit `deviceId` and a device-bound temporary `permissionId` on every routed worker tool call.
+One controller owns the public OAuth/Funnel endpoint. Local and remote workers expose Desktop Commander through the controller with an explicit `deviceId` on every routed worker tool call.
 
 ## Architecture
 
@@ -54,9 +54,7 @@ See [`worker/README.md`](worker/README.md) for the dedicated Docker worker insta
 
 ## Tool routing
 
-The router adds `list_devices` and requires both `deviceId` and a matching temporary `permissionId` on every Desktop Commander worker tool. Example targets are `local-pc` and `remote-worker`.
-
-New temporary-permission issuance is currently disabled. Existing active permissions remain device-bound, can be checked with `temporary_permission_status`, can be invalidated with `revoke_temporary_permission`, and continue to be validated against `.state/wcm-temporary-permissions.json`. Only SHA-256 hashes are persisted; plaintext `permissionId` values are never written to that state file or router audit log.
+The router adds `list_devices` and requires `deviceId` on every Desktop Commander worker tool. Example targets are `local-pc` and `remote-worker`. After resolving the target worker, the router removes its own `deviceId` routing argument, applies configured path mappings, and forwards the remaining business arguments directly to Desktop Commander. Ordinary WCM tools are not gated by the approval feature.
 
 The current approval work is isolated behind one test-only execution path:
 
@@ -65,7 +63,9 @@ The current approval work is isolated behind one test-only execution path:
 3. The card calls the app-only `resolve_approval_test` tool. Approve dispatches only the frozen command to the target worker through `start_process`; Deny does not dispatch it.
 4. The App writes the terminal result into model context and asks ChatGPT to continue without reconstructing the command.
 
-This test approval path does not issue a `permissionId` and does not alter the access rules of ordinary Desktop Commander tools.
+MCP Apps are negotiated per modern MCP request. `server/discover` advertises the `io.modelcontextprotocol/ui` extension with `text/html;profile=mcp-app`; the approval tools and resource are exposed only when the client request advertises the same capability. Legacy/text-only clients continue to receive ordinary WCM tools but do not receive the approval-test tools or approval UI resource.
+
+The approval View uses the official `@modelcontextprotocol/ext-apps` `App` client rather than a hand-written postMessage bridge. Vite builds it as one self-contained HTML file. At router startup WCM hashes that HTML and derives the active `ui://wcm/approval-test/<hash>.html` resource URI, so changed UI content automatically gets a fresh host cache key without retaining old UI routes.
 
 The router also advertises bundled specialized capabilities in MCP discovery, `list_devices`, and `start_process` descriptions so an LLM can discover them without pretending that each helper is a standalone MCP action. The current catalog contains two capabilities: Bilibili download under `tools/bilibili-download` (including its bridge and bundled `yt-dlp.exe` fallback) and Quark transfer under `tools/quark-transfer`. Their READMEs remain the source of truth for invocation details and authentication requirements.
 
@@ -78,7 +78,7 @@ npm test
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\rdc-status.ps1
 ```
 
-`npm test` is self-contained with respect to test data/config, but do not launch it through the same live WCM connection that is controlling this checkout: doing so can interrupt that worker/gateway transport and cause temporary HTTP 502s. Run it from an independent local terminal instead. It covers temporary-permission issuance/expiry/revocation/persistence, OAuth state pruning/caps, worker heartbeat expiry, and reconnect isolation.
+`npm test` is self-contained with respect to test data/config, but do not launch it through the same live WCM connection that is controlling this checkout: doing so can interrupt that worker/gateway transport and cause temporary HTTP 502s. Run it from an independent local terminal instead. It type-checks and builds the MCP App, checks the frozen approval state machine and routing contracts, and covers OAuth state pruning/caps, worker heartbeat expiry, and reconnect isolation.
 
 To exercise an already configured live controller and sidecar, run:
 
@@ -86,7 +86,7 @@ To exercise an already configured live controller and sidecar, run:
 npm run test:live
 ```
 
-The live suite covers legacy OAuth/stateful MCP, MCP `2026-07-28`, the isolated approval-test execution path, the ordinary permission boundary, device routing, resources, and duplicate external JSON-RPC IDs. It uses the configured OAuth deployment and can register test clients and execute the frozen approval-test command on the target worker, so it is intentionally separate from the default CI test.
+The live suite covers legacy OAuth/stateful MCP, MCP `2026-07-28`, MCP Apps capability negotiation, the isolated approval-test execution path, direct ordinary-tool routing, device routing, resources, and duplicate external JSON-RPC IDs. It uses the configured OAuth deployment and can register test clients and execute the frozen approval-test command on the target worker, so it is intentionally separate from the default CI test.
 
 The public endpoint is configured by `RDC_RESOURCE`. With a Tailscale Funnel hostname it typically looks like:
 
@@ -133,9 +133,9 @@ When a live WCM deployment behaves differently from the checked-out code, debug 
 
 WCM can execute commands and access files on registered devices. Expose only the OAuth-protected sidecar through your HTTPS ingress; keep the router and worker hubs private to localhost/Tailscale. Remote worker admission relies on the registered Tailscale source IP, so treat your tailnet and `config/devices.json` as part of the trust boundary.
 
-Temporary `permissionId` values are bearer capabilities. Do not paste them into logs, source files, tickets, or other persistent storage. WCM audit records use only a short hash fingerprint, and persisted grant records contain only the full hash plus device/timing metadata.
+The approval-test action is frozen server-side before the card is shown. The one-time approval nonce is delivered only in the tool result `_meta`, is compared timing-safely, and is never accepted as a replacement for the frozen device or command. Pending approval state is memory-only.
 
-Secrets, OAuth state, temporary-permission state, worker-local configuration, runtime logs, and `node_modules` are excluded from Git. Never commit the generated `config/rdc.env`, `config/devices.json`, `config/worker-*.env`, or `.state/` contents.
+Secrets, OAuth state, worker-local configuration, runtime logs, and `node_modules` are excluded from Git. Never commit the generated `config/rdc.env`, `config/devices.json`, `config/worker-*.env`, or `.state/` contents.
 
 
 ## License

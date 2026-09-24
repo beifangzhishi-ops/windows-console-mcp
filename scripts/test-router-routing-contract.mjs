@@ -1,9 +1,8 @@
 import assert from 'node:assert/strict';
 import {
-  stripTemporaryPermissionRoutingArguments,
-  temporaryPermissionRouterTools,
-  withTemporaryPermissionRoutingSchema,
-} from '../router/temporary-permission-routing.mjs';
+  stripDeviceRoutingArguments,
+  withDeviceRoutingSchema,
+} from '../router/device-routing.mjs';
 import {
   APPROVAL_TEST_UI_URI,
   approvalTestRouterTools,
@@ -17,24 +16,16 @@ const deviceSchema = {
   description: 'Target device.',
 };
 
-const routedSchema = withTemporaryPermissionRoutingSchema({
+const routedSchema = withDeviceRoutingSchema({
   type: 'object',
   properties: { value: { type: 'string' } },
   required: ['value'],
 }, deviceSchema);
-assert.deepEqual(routedSchema.required.sort(), ['deviceId', 'permissionId', 'value'].sort());
+assert.deepEqual(routedSchema.required.sort(), ['deviceId', 'value'].sort());
 assert.deepEqual(routedSchema.properties.deviceId.enum, ['device-a', 'device-b']);
-assert.equal(routedSchema.properties.permissionId.type, 'string');
 
-const permissionTools = temporaryPermissionRouterTools(deviceSchema);
-assert.deepEqual(permissionTools.map((tool) => tool.name).sort(), [
-  'revoke_temporary_permission',
-  'temporary_permission_status',
-]);
-
-const stripped = stripTemporaryPermissionRoutingArguments({
+const stripped = stripDeviceRoutingArguments({
   deviceId: 'device-a',
-  permissionId: 'wcm_perm_secret',
   value: 'forward-me',
 });
 assert.deepEqual(stripped, { value: 'forward-me' });
@@ -48,11 +39,9 @@ assert.equal(testExec._meta, undefined);
 assert.deepEqual(testExec.inputSchema.required, ['deviceId']);
 assert.equal(testExec.inputSchema.properties.command, undefined);
 assert.deepEqual(requestCard.inputSchema.required, ['approval_id']);
-assert.equal(requestCard._meta?.['openai/outputTemplate'], APPROVAL_TEST_UI_URI);
-assert.equal(requestCard._meta?.['openai/widgetAccessible'], true);
+assert.equal(requestCard._meta?.ui?.resourceUri, APPROVAL_TEST_UI_URI);
 assert.deepEqual(requestCard._meta?.ui?.visibility, ['model', 'app']);
 assert.deepEqual(resolver._meta?.ui?.visibility, ['app']);
-assert.equal(resolver._meta?.['openai/widgetAccessible'], true);
 assert.equal(resolver.inputSchema.properties.approval_id.format, 'uuid');
 assert.equal(resolver.inputSchema.properties.approval_nonce.minLength, 20);
 
@@ -83,4 +72,4 @@ assert.equal(localApprovalTestResource({
   params: { uri: 'ui://worker/existing' },
 }), null);
 
-console.log('WCM router permission/test-approval contract: PASS');
+console.log('WCM router device/approval-test contract: PASS');

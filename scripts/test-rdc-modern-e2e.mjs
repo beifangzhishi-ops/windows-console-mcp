@@ -1,4 +1,6 @@
 import fs from 'node:fs';
+import { EXTENSION_ID, RESOURCE_MIME_TYPE } from '@modelcontextprotocol/ext-apps/server';
+import { APPROVAL_TEST_UI_URI } from '../router/approval-test-routing.mjs';
 import { loadConfig } from '../rdc-sidecar/config.mjs';
 import { createPkceChallenge } from '../rdc-sidecar/oauth.mjs';
 
@@ -6,6 +8,11 @@ const config = loadConfig(process.cwd());
 const baseUrl = process.env.RDC_E2E_BASE_URL || `http://${config.host}:${config.port}`;
 const redirectUri = 'http://127.0.0.1:19002/rdc-modern-e2e-callback';
 const protocol = '2026-07-28';
+const clientCapabilities = {
+  extensions: {
+    [EXTENSION_ID]: { mimeTypes: [RESOURCE_MIME_TYPE] },
+  },
+};
 let stage = 'startup';
 
 async function request(path, options = {}) {
@@ -98,12 +105,21 @@ function modernHeaders(accessToken) {
     'Content-Type': 'application/json',
     'MCP-Protocol-Version': protocol,
   };
-}async function mcp(accessToken, id, method, params = {}) {
+}async function mcp(accessToken, id, method, params = {}, { ui = true } = {}) {
   stage = method;
+  const requestParams = ui
+    ? {
+        ...params,
+        _meta: {
+          ...(params?._meta || {}),
+          'io.modelcontextprotocol/clientCapabilities': clientCapabilities,
+        },
+      }
+    : params;
   const result = await request('/rdc/mcp', {
     method: 'POST',
     headers: modernHeaders(accessToken),
-    body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
+    body: JSON.stringify({ jsonrpc: '2.0', id, method, params: requestParams }),
   });
   requireStatus(result, 200);
   if (!result.json || result.json.error) {
@@ -125,10 +141,18 @@ async function runModern(approvalSecret) {
     throw new Error('server/discover did not advertise tools.listChanged=true.');
   }
   if (!discover?.capabilities?.resources) throw new Error('server/discover did not advertise resources.');
+  const uiExtension = discover?.capabilities?.extensions?.[EXTENSION_ID];
+  if (!uiExtension?.mimeTypes?.includes(RESOURCE_MIME_TYPE)) {
+    throw new Error('server/discover did not advertise the MCP Apps extension.');
+  }
   if (!discover?.instructions?.includes('network connectivity can be transiently unstable')) {
     throw new Error('server/discover did not advertise transient network error semantics.');
   }
-  const toolsResult = await mcp(accessToken, 2, 'tools/list', {});
+  const textOnlyTools = await mcp(accessToken, 2, 'tools/list', {}, { ui: false });
+  if (textOnlyTools?.tools?.some((tool) => tool?.name === 'approval_test_exec')) {
+    throw new Error('text-only modern client was exposed to approval-test tools.');
+  }
+  const toolsResult = await mcp(accessToken, 3, 'tools/list', {});
   const tools = toolsResult?.tools;
   if (!Array.isArray(tools) || tools.length < 20) throw new Error('tools/list returned too few tools.');
   const listDevicesTool = tools.find((tool) => tool?.name === 'list_devices');
@@ -146,32 +170,32 @@ async function runModern(approvalSecret) {
   if (!getConfigTool.inputSchema?.required?.includes('deviceId')) {
     throw new Error('get_config does not require deviceId.');
   }
-  if (!getConfigTool.inputSchema?.required?.includes('permissionId')) {
-    throw new Error('get_config does not require permissionId.');
-  }
   if (approvalTestExecTool._meta) {
     throw new Error('approval_test_exec must not expose approval-card metadata.');
   }
-  if (requestApprovalTestTool._meta?.['openai/outputTemplate'] !== 'ui://wcm/approval-test-v1.html') {
-    throw new Error('request_approval_test did not expose the WCM approval test card.');
+  if (requestApprovalTestTool._meta?.ui?.resourceUri !== APPROVAL_TEST_UI_URI) {
+    throw new Error('request_approval_test did not expose the current WCM approval test resource.');
+  }
+  if (!/^ui:\/\/wcm\/approval-test\/[a-f0-9]{16}\.html$/u.test(APPROVAL_TEST_UI_URI)) {
+    throw new Error('approval UI URI is not content-hashed.');
   }
   if (requestApprovalTestTool._meta?.ui?.visibility?.join(',') !== 'model,app') {
     throw new Error('request_approval_test did not expose model+app visibility.');
   }
-  if (resolveApprovalTestTool._meta?.ui?.visibility?.join(',') !== 'app' ||
-      resolveApprovalTestTool._meta?.['openai/widgetAccessible'] !== true) {
+  if (resolveApprovalTestTool._meta?.ui?.visibility?.join(',') !== 'app') {
     throw new Error('resolve_approval_test is not app-only.');
+  }
+  if (Object.keys(requestApprovalTestTool._meta || {}).join(',') !== 'ui' ||
+      Object.keys(resolveApprovalTestTool._meta || {}).join(',') !== 'ui') {
+    throw new Error('approval tools expose metadata outside the current MCP Apps ui namespace.');
   }
   for (const name of ['read_file', 'edit_block']) {
     const tool = tools.find((candidate) => candidate?.name === name);
     if (!tool) throw new Error(`${name} was not listed.`);
-    const meta = tool._meta || {};
-    if (meta['openai/outputTemplate'] || meta['ui/resourceUri'] || meta.ui || meta['openai/widgetAccessible']) {
-      throw new Error(`${name} still exposes UI template metadata.`);
-    }
+    if (tool._meta) throw new Error(`${name} still exposes worker UI metadata.`);
   }
 
-  const devices = await mcp(accessToken, 3, 'tools/call', {
+  const devices = await mcp(accessToken, 4, 'tools/call', {
     name: 'list_devices', arguments: {},
   });
   if (devices?.isError === true) throw new Error('list_devices returned an error.');
@@ -182,7 +206,7 @@ async function runModern(approvalSecret) {
   const targetDeviceId = deviceInfo?.defaultDeviceId || deviceInfo?.devices?.find((item) => item?.online)?.deviceId;
   if (!targetDeviceId) throw new Error('list_devices did not expose an online/default device.');
 
-  const frozenRequest = await mcp(accessToken, 4, 'tools/call', {
+  const frozenRequest = await mcp(accessToken, 5, 'tools/call', {
     name: 'approval_test_exec',
     arguments: {
       deviceId: targetDeviceId,
@@ -199,7 +223,7 @@ async function runModern(approvalSecret) {
   if (frozenRequest?._meta?.approval_nonce) {
     throw new Error('approval_test_exec generated an approval nonce before card presentation.');
   }
-  const cardRequest = await mcp(accessToken, 5, 'tools/call', {
+  const cardRequest = await mcp(accessToken, 6, 'tools/call', {
     name: 'request_approval_test',
     arguments: { approval_id: approvalId },
     _meta: { 'openai/session': 'wcm-modern-e2e-session' },
@@ -211,7 +235,7 @@ async function runModern(approvalSecret) {
   if (Object.hasOwn(cardRequest?.structuredContent || {}, 'approval_nonce')) {
     throw new Error('request_approval_test leaked approval_nonce into structuredContent.');
   }
-  const wrongSessionApproval = await mcp(accessToken, 6, 'tools/call', {
+  const wrongSessionApproval = await mcp(accessToken, 7, 'tools/call', {
     name: 'resolve_approval_test',
     arguments: {
       approval_id: approvalId,
@@ -224,7 +248,7 @@ async function runModern(approvalSecret) {
       !JSON.stringify(wrongSessionApproval).includes('different host session')) {
     throw new Error('approval test was not bound to the host session.');
   }
-  const approvalResult = await mcp(accessToken, 7, 'tools/call', {
+  const approvalResult = await mcp(accessToken, 8, 'tools/call', {
     name: 'resolve_approval_test',
     arguments: {
       approval_id: approvalId,
@@ -240,31 +264,30 @@ async function runModern(approvalSecret) {
     throw new Error('approval test did not execute and consume the frozen command.');
   }
 
-  const targetConfig = await mcp(accessToken, 8, 'tools/call', {
+  const targetConfig = await mcp(accessToken, 9, 'tools/call', {
     name: 'get_config',
-    arguments: { deviceId: targetDeviceId, permissionId: 'not-an-active-permission' },
+    arguments: { deviceId: targetDeviceId },
   });
-  if (targetConfig?.isError !== true ||
-      !JSON.stringify(targetConfig).includes('issuance is currently disabled')) {
-    throw new Error('ordinary routed tool did not retain its existing permission boundary.');
+  if (targetConfig?.isError === true || !Array.isArray(targetConfig?.content)) {
+    throw new Error('ordinary routed tool did not execute directly.');
   }
 
-  const resourcesResult = await mcp(accessToken, 9, 'resources/list', {});
+  const resourcesResult = await mcp(accessToken, 10, 'resources/list', {});
   const resources = resourcesResult?.resources;
   const filePreviewUri = 'ui://desktop-commander/file-preview';
-  const approvalTestUiUri = 'ui://wcm/approval-test-v1.html';
+  const approvalTestUiUri = APPROVAL_TEST_UI_URI;
   if (!Array.isArray(resources) || !resources.some((item) => item?.uri === filePreviewUri)) {
     throw new Error('resources/list did not include file preview UI.');
   }
   if (!resources.some((item) => item?.uri === approvalTestUiUri)) {
     throw new Error('resources/list did not include WCM approval test UI.');
   }
-  const resourceRead = await mcp(accessToken, 10, 'resources/read', { uri: filePreviewUri });
+  const resourceRead = await mcp(accessToken, 11, 'resources/read', { uri: filePreviewUri });
   const html = resourceRead?.contents?.[0]?.text || '';
   if (!html.includes('<html') && !html.includes('<!DOCTYPE html')) {
     throw new Error('resources/read did not return the file preview HTML.');
   }
-  const approvalTestUi = await mcp(accessToken, 11, 'resources/read', { uri: approvalTestUiUri });
+  const approvalTestUi = await mcp(accessToken, 12, 'resources/read', { uri: approvalTestUiUri });
   const approvalTestHtml = approvalTestUi?.contents?.[0]?.text || '';
   if (!approvalTestHtml.includes('WCM approval test')) {
     throw new Error('resources/read did not return WCM approval test HTML.');
@@ -272,7 +295,7 @@ async function runModern(approvalSecret) {
   if (approvalTestUi?.contents?.[0]?._meta?.ui?.prefersBorder !== true) {
     throw new Error('WCM approval test resource did not expose MCP App UI metadata.');
   }
-  const templates = await mcp(accessToken, 12, 'resources/templates/list', {});
+  const templates = await mcp(accessToken, 13, 'resources/templates/list', {});
   if (!Array.isArray(templates?.resourceTemplates)) {
     throw new Error('resources/templates/list did not return an array.');
   }
@@ -302,7 +325,7 @@ async function main() {
   console.log('tools_count=' + result.toolCount);
   console.log('list_devices=PASS');
   console.log('approval_test_exec=PASS');
-  console.log('ordinary_permission_boundary=PASS');
+  console.log('ordinary_direct_routing=PASS');
   console.log('resources_list=PASS');
   console.log('resources_read=PASS');
   console.log('resource_templates_list=PASS');

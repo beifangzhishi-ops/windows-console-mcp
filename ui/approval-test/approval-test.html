@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WCM approval test</title>
+</head>
+<body>
+  <main id="card">
+    <h1>WCM approval test</h1>
+    <p id="status" role="status">Loading MCP App…</p>
+    <section id="details" hidden>
+      <dl>
+        <div><dt>Device</dt><dd id="device"></dd></div>
+        <div><dt>Approval</dt><dd id="approval-id"></dd></div>
+        <div><dt>Expires</dt><dd id="expires"></dd></div>
+        <div><dt>Host</dt><dd id="host"></dd></div>
+      </dl>
+      <p id="justification"></p>
+      <pre id="command"></pre>
+      <div id="actions">
+        <button id="deny" type="button" disabled>Deny</button>
+        <button id="approve" type="button" disabled>Approve</button>
+      </div>
+    </section>
+  </main>
+  <script type="module" src="./main.ts"></script>
+</body>
+</html>
