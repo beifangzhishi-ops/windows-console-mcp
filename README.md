@@ -98,29 +98,20 @@ https://your-machine.your-tailnet.ts.net/rdc/mcp
 
 ### ChatGPT rebuild handoff rule
 
-ChatGPT-side WCM/plugin/connector rebuilds are **user-operated**. The assistant must not rename, delete, recreate, reconnect, or otherwise rebuild the ChatGPT WCM registration on the user's behalf unless the user explicitly overrides this rule for that rebuild.
+When the ChatGPT WCM registration needs to be rebuilt, provide the current public MCP resource from `RDC_RESOURCE` and the following absolute-path PowerShell command so the user can print the current WCM key and URL locally:
 
-When a tool-schema change means the ChatGPT registration needs to be rebuilt, the assistant should stop at the handoff boundary and provide only the information the user needs to rebuild it:
-
-1. Resolve the current public MCP resource from `RDC_RESOURCE` (normally from ignored `config/rdc.env`) and give that MCP address to the user.
-2. If the host cache needs to be refreshed or the tools need to be rebuilt, give the user the following absolute-path PowerShell command so they can print the current WCM key and URL in their own terminal. Do not copy the printed key into chat:
-
-   ```powershell
-   $wcmKey = (Get-Content -LiteralPath 'C:\Users\Songjx\Documents\ChatGPT\windows-console-mcp\.state\rdc-approval-secret.txt' -Raw).Trim()
-   $wcmUrl = ((Get-Content -LiteralPath 'C:\Users\Songjx\Documents\ChatGPT\windows-console-mcp\config\rdc.env' | Where-Object { $_ -match '^RDC_RESOURCE=' } | Select-Object -First 1) -replace '^RDC_RESOURCE=', '').Trim().Trim('"')
-   Write-Output ("WCM key: " + $wcmKey)
-   Write-Output ("WCM URL: " + $wcmUrl)
-   ```
-
-3. Do not use BMG to operate ChatGPT settings, rename the existing connector, create a replacement connector/plugin, or complete OAuth/consent for the user.
-4. If the current ChatGPT UI requires an archive upload, do not proactively build or upload a plugin archive as part of rebuild. Only build/provide one when the user explicitly asks for the archive.
+```powershell
+$wcmKey = (Get-Content -LiteralPath 'C:\Users\Songjx\Documents\ChatGPT\windows-console-mcp\.state\rdc-approval-secret.txt' -Raw).Trim()
+$wcmUrl = ((Get-Content -LiteralPath 'C:\Users\Songjx\Documents\ChatGPT\windows-console-mcp\config\rdc.env' | Where-Object { $_ -match '^RDC_RESOURCE=' } | Select-Object -First 1) -replace '^RDC_RESOURCE=', '').Trim().Trim('"')
+Write-Output ("WCM key: " + $wcmKey)
+Write-Output ("WCM URL: " + $wcmUrl)
+```
 
 ## Troubleshooting
 
 When a live WCM deployment behaves differently from the checked-out code, debug the runtime path before changing client configuration. The most common failure modes are stale processes, worker connection churn, or a tool-discovery request that never completed.
 
 - **Code on disk is not proof that the live process reloaded it.** Compare the running router/worker PIDs and start times with the change you expect to be live. Then query the live router directly (`server/discover`, `tools/list`, or the relevant tool call) instead of inferring state from the checkout alone. After a restart, confirm that the PID changed and that `list_devices` works again.
-- **OAuth reconnect and tool-schema refresh are separate events.** Reconnecting a client can refresh credentials without causing it to request `server/discover` or `tools/list` again. Use sidecar logs to verify that a discovery/list request actually arrived and completed. When the ChatGPT registration needs to be rebuilt, follow the **ChatGPT rebuild handoff rule** above.
 - **A `tools/list` timeout can look like stale schema or client caching.** Inspect MCP BEGIN/END log pairs and elapsed time. If `server/discover` succeeds but `tools/list` is missing an END record, is cancelled, or takes tens of seconds, fix that transport/runtime failure first. Once healthy, `tools/list` should normally complete quickly and consistently.
 - **Only one active worker should own a given `deviceId`.** Duplicate or orphaned workers using the same ID can repeatedly replace each other's connection, causing reconnect loops and invalidating in-flight RPCs. Check worker-hub logs for frequent `Worker connected` messages and inspect process parentage. Keep the supervisor-owned worker and terminate stale/manual copies rather than starting another copy on top of them.
 - **Large tool results are capped at the router boundary.** `tools/call` results larger than 512 KiB are replaced with a compact error before they reach the MCP client (`WC_MAX_TOOL_RESULT_BYTES` can override the limit). Large images are previewed at a 64 KiB raw budget, and `read_multiple_files` advertises a four-image batch limit to avoid cumulative media payload spikes.
