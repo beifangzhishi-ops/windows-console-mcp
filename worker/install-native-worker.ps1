@@ -79,10 +79,17 @@ WScript.Quit rc
 "@ | Set-Content -LiteralPath $vbs -Encoding ASCII
 
 $action=New-ScheduledTaskAction -Execute "$env:WINDIR\System32\wscript.exe" -Argument "`"$vbs`""
-$trigger=New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+$taskUser=[string](& whoami.exe 2>$null)
+$taskUser=$taskUser.Trim()
+if(-not $taskUser){
+    if($env:USERDOMAIN -and $env:USERNAME){ $taskUser="$env:USERDOMAIN\$env:USERNAME" }
+    elseif($env:USERNAME){ $taskUser=$env:USERNAME }
+}
+if(-not $taskUser){ throw 'Unable to determine the current Windows account for Scheduled Task registration.' }
+$trigger=New-ScheduledTaskTrigger -AtLogOn -User $taskUser
 $trigger.Delay='PT1M'
 $settings=New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -RestartCount 10 -RestartInterval (New-TimeSpan -Minutes 1) -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-$principal=New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
+$principal=New-ScheduledTaskPrincipal -UserId $taskUser -LogonType Interactive -RunLevel Limited
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
 $stdoutLog=Join-Path $repoRoot ("logs\native-worker-{0}-stdout.log" -f $safeId)
 $stderrLog=Join-Path $repoRoot ("logs\native-worker-{0}-stderr.log" -f $safeId)

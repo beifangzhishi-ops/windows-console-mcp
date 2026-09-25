@@ -14,6 +14,8 @@ const status = read('status-native-worker.ps1');
 
 assert.match(install, /Node\.js 20 or newer/u);
 assert.match(install, /Register-ScheduledTask/u);
+assert.match(install, /whoami\.exe/u);
+assert.match(install, /New-ScheduledTaskPrincipal -UserId \$taskUser/u);
 assert.match(install, /MultipleInstances IgnoreNew/u);
 assert.match(install, /Connected to controller as/u);
 assert.match(install, /WC_DC_SCRIPT=\$dc/u);
