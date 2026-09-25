@@ -14,3 +14,11 @@
 - Only a result explicitly classified as `WCM classification: command_blocked`, originating from the exact upstream marker `Error: Command not allowed`, means the WCM command blocklist rejected the command.
 - Schema/argument errors, path errors, command-not-found errors, non-zero exits, HTTP 502, worker disconnects, and runtime/process failures are not command-blocklist rejections.
 - A single network/site error such as `Network is unreachable`, DNS failure, timeout, connection reset, HTTP 403/404, or target-site verification/challenge does not mean WCM or the target device is unavailable. Check `list_devices`, retry transient network requests 2-3 times when appropriate, and only conclude WCM/device connectivity is unavailable when the device is reported offline or repeated harmless local WCM checks fail.
+
+## Native remote worker operations
+
+- Native remote workers reuse `worker/agent.mjs`; do not create a separate protocol or Router path for them.
+- The native worker Scheduled Task is per device and owns only its matching supervisor/agent process tree. Never kill unrelated Node processes during install, restart, or uninstall.
+- Never run Docker and native workers concurrently with the same `deviceId`; stop the old worker before cutover and verify exactly one connection afterward.
+- Native Windows workers must not retain Docker path mappings such as `C:\ -> /host`. Controller `config/devices.json` is loaded at Router startup, so a mapping change takes effect only after a controlled Router restart.
+- Do not restart the Controller Router from the WCM path it is currently carrying unless an independent recovery/control path is available.

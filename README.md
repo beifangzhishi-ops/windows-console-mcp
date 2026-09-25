@@ -48,9 +48,11 @@ logs/
 
 ## Remote workers
 
-Remote workers do not run OAuth or Funnel. They need Tailscale and Docker Desktop on the worker Windows host.
+Remote workers do not run OAuth or Funnel. They connect directly to the Controller's Tailscale-bound worker hub.
 
-See [`worker/README.md`](worker/README.md) for the dedicated Docker worker installer.
+Windows remote workers can run natively with Node.js 20+ or in the existing Docker deployment. The native deployment uses the same `worker/agent.mjs` runtime as the Controller host, wrapped by a dedicated per-device Scheduled Task and supervisor; no worker protocol fork is involved.
+
+See [`worker/README.md`](worker/README.md) for native install/status/uninstall and Docker deployment details.
 
 ## Tool routing
 

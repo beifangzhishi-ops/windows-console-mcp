@@ -8,7 +8,7 @@
   },
   "scripts": {
     "postinstall": "node patches/desktop-commander-image-guard.mjs",
-    "test:stability": "node tests/response-guard-smoke.mjs && node tests/image-guard-smoke.mjs && node tests/stdio-guard-smoke.mjs"
+    "test:stability": "node tests/response-guard-smoke.mjs && node tests/image-guard-smoke.mjs && node tests/stdio-guard-smoke.mjs && node tests/native-template-smoke.mjs"
   },
   "dependencies": {
     "@wonderwhy-er/desktop-commander": "0.2.48"
