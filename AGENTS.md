@@ -22,3 +22,10 @@
 - Never run Docker and native workers concurrently with the same `deviceId`; stop the old worker before cutover and verify exactly one connection afterward.
 - Native Windows workers must not retain Docker path mappings such as `C:\ -> /host`. Controller `config/devices.json` is loaded at Router startup, so a mapping change takes effect only after a controlled Router restart.
 - Do not restart the Controller Router from the WCM path it is currently carrying unless an independent recovery/control path is available.
+
+## Upstream Desktop Commander boundary
+
+- Treat the bundled Desktop Commander tool implementations, worker-facing tool schemas, and worker protocol as upstream code. WCM-specific features must not patch or fork those upstream tool implementations merely to add WCM behavior.
+- Add WCM-only capabilities through the Router augmentation layer instead: Router-local tools, routing metadata, approval/state management, path/device routing, and result handling belong in the Router.
+- Existing Desktop Commander tool names, business arguments, worker-side schemas, and worker protocol should remain compatible with upstream so future Desktop Commander updates can be synchronized without carrying WCM-specific patches through the upstream tool source.
+- If a WCM feature would otherwise require changing an upstream Desktop Commander tool, prefer a separate Router-local wrapper/tool or Router-side orchestration. Change upstream-derived tool code only when the user explicitly approves that boundary change.
