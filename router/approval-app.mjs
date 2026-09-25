@@ -82,6 +82,7 @@ export const APPROVAL_UI_HTML = String.raw`<!doctype html>
     <div class="row"><div class="label">Device</div><div class="value" id="workspace"></div></div>
     <div class="row"><div class="label">Tool</div><div class="value" id="tool"></div></div>
     <div class="row"><div class="label">Duration</div><div class="value" id="duration"></div></div>
+    <div class="row"><div class="label">Valid until</div><div class="value" id="validUntil"></div></div>
     <div class="row"><div class="label">Approval</div><div class="value" id="environment"></div></div>
     <div id="command"></div>
     <div id="status" aria-live="polite">Waiting for your decision.</div>
@@ -104,6 +105,7 @@ export const APPROVAL_UI_HTML = String.raw`<!doctype html>
       const workspace = document.getElementById("workspace");
       const tool = document.getElementById("tool");
       const duration = document.getElementById("duration");
+      const validUntil = document.getElementById("validUntil");
       const environment = document.getElementById("environment");
       const command = document.getElementById("command");
       const status = document.getElementById("status");
@@ -141,6 +143,13 @@ export const APPROVAL_UI_HTML = String.raw`<!doctype html>
         return value + " seconds";
       }
 
+      function formatDeadline(value) {
+        if (!value) return "Unknown";
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) return String(value);
+        return date.toLocaleString();
+      }
+
       function readInitialResult(result = null) {
         const envelope = result || toolEnvelope();
         const structured = envelope?.structuredContent ||
@@ -155,6 +164,7 @@ export const APPROVAL_UI_HTML = String.raw`<!doctype html>
         workspace.textContent = structured.device_id || "Unknown";
         tool.textContent = structured.tool_name || "Unknown";
         duration.textContent = formatDuration(structured.requested_duration_seconds);
+        validUntil.textContent = formatDeadline(structured.card_expires_at);
         environment.textContent = structured.approval_id || "Unknown";
         command.textContent =
           "Approving grants access to all routed WCM tools on all registered devices for " +
@@ -163,7 +173,15 @@ export const APPROVAL_UI_HTML = String.raw`<!doctype html>
         approve.textContent = "Approve " + formatDuration(structured.requested_duration_seconds);
         if (!structured.approval_id) return false;
         if (!approvalNonce) {
-          setStatus("Approval token is unavailable in this host.", true);
+          if (structured.classification === "approval_already_bound") {
+            setStatus("This approval is already bound to its existing card. Use that card to approve or deny.", true);
+          } else if (structured.state === "expired") {
+            setStatus("This approval has expired. The frozen action was not dispatched.", true);
+          } else if (structured.state === "superseded") {
+            setStatus("This approval was invalidated by a WCM approval-policy change.", true);
+          } else {
+            setStatus("Approval token is unavailable in this host.", true);
+          }
           approve.disabled = true;
           deny.disabled = true;
         }
@@ -197,6 +215,8 @@ export const APPROVAL_UI_HTML = String.raw`<!doctype html>
           grant_approval_id: structured?.grant_approval_id,
           grant_expires_at: structured?.grant_expires_at,
           requested_duration_seconds: structured?.requested_duration_seconds,
+          card_expires_at: structured?.card_expires_at,
+          terminal_reason: structured?.terminal_reason,
           action_state: structured?.action_state,
           action_failed: structured?.action_failed,
           output: typeof structured?.output === "string"
@@ -259,6 +279,10 @@ export const APPROVAL_UI_HTML = String.raw`<!doctype html>
               " The timed WCM grant remains active.", true);
           } else if (structured.state === "denied") {
             setStatus("Denied. The frozen action was not dispatched.");
+          } else if (structured.state === "expired") {
+            setStatus("This approval card expired before it was resolved. The frozen action was not dispatched.", true);
+          } else if (structured.state === "superseded") {
+            setStatus("This approval was invalidated by a WCM approval-policy change. The frozen action was not dispatched.", true);
           } else {
             setStatus(structured.output || "Approved. Timed WCM access is active.");
           }

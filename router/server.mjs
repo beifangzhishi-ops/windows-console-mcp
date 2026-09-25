@@ -51,6 +51,7 @@ const WORKER_PROTOCOL_VERSION = '2025-06-18';
 const MAX_BODY_BYTES = 1024 * 1024;
 const MAX_TOOL_RESULT_BYTES = resolveMaxRouterToolResultBytes(process.env.WC_MAX_TOOL_RESULT_BYTES);
 const ROUTER_TRACE_FILE = path.resolve(process.cwd(), 'logs', 'router-trace.log');
+const ROUTER_INSTANCE_ID = randomUUID();
 const registry = loadDeviceRegistry(process.cwd());
 const SPECIALIZED_CAPABILITIES = [
   'Bundled specialized capabilities (discoverability only; these are helper workflows, not standalone MCP actions):',
@@ -67,21 +68,37 @@ const routerLogger = {
   log: (...values) => appendRouterTrace('INFO', values.map(String).join(' ')),
   error: (...values) => appendRouterTrace('ERROR', values.map(String).join(' ')),
 };
+routerLogger.log(`Router instance started instance=${ROUTER_INSTANCE_ID} pid=${process.pid}`);
+function approvalAudit(event) {
+  appendRouterTrace('AUDIT', JSON.stringify({
+    router_instance_id: ROUTER_INSTANCE_ID,
+    ...event,
+  }));
+}
 const approvalPolicyStore = new ApprovalPolicyStore({
   root: process.cwd(),
   logger: routerLogger,
 });
 const pendingActionManager = new PendingActionManager({
-  audit: (event) => appendRouterTrace('AUDIT', JSON.stringify(event)),
+  audit: approvalAudit,
 });
 const timedGrantManager = new TimedGrantManager({
-  audit: (event) => appendRouterTrace('AUDIT', JSON.stringify(event)),
+  audit: approvalAudit,
 });
 let approvalPolicy = approvalPolicyStore.current();
 
 function refreshApprovalPolicy() {
+  const previous = approvalPolicy;
   const refreshed = approvalPolicyStore.refresh();
   if (refreshed.changed) {
+    approvalAudit({
+      event: 'policy_changed',
+      previous_mode: previous?.mode || null,
+      previous_revision: previous?.revision ?? null,
+      mode: refreshed.policy.mode,
+      revision: refreshed.policy.revision,
+      source: refreshed.source,
+    });
     timedGrantManager.clearAll('policy_changed');
     pendingActionManager.clearPending('policy_changed');
   }
@@ -99,6 +116,10 @@ function approvalRuntimeSnapshot() {
     default_duration_seconds: DEFAULT_APPROVAL_DURATION_SECONDS,
     pending: Boolean(pending),
     pending_approval_id: pending?.approval_id || null,
+    pending_created_at: pending?.created_at || null,
+    pending_card_bound: Boolean(pending?.card_bound_at),
+    pending_card_bound_at: pending?.card_bound_at || null,
+    pending_card_expires_at: pending?.card_expires_at || null,
     pending_expires_at: pending?.pending_expires_at || null,
     grant_active: Boolean(grant),
     grant_approval_id: grant?.approval_id || null,
@@ -341,7 +362,11 @@ function approvalPendingResult(pending, requestedTool) {
       ? pending.request.action_summary
       : 'Another WCM full-access approval is already pending.',
     intent_sha256: pending.owner ? pending.request.intent_sha256 : null,
+    created_at: pending.request.created_at,
+    card_bound_at: pending.request.card_bound_at,
+    card_expires_at: pending.request.card_expires_at,
     pending_expires_at: pending.request.pending_expires_at,
+    terminal_reason: pending.request.terminal_reason,
     default_duration_seconds: DEFAULT_APPROVAL_DURATION_SECONDS,
     requested_duration_seconds: null,
     grant_scope: 'full_wcm',
@@ -389,6 +414,46 @@ function approvalCardResult(prepared) {
       approval_nonce: prepared.approvalNonce,
     },
   };
+}
+
+function retainedApprovalResult(approvalId, error, {
+  isRequestApproval = false,
+} = {}) {
+  const known = pendingActionManager.lookup(approvalId);
+  if (!known) return null;
+  const grant = timedGrantManager.active();
+  const state = known.state;
+  const classification = state === 'pending' && isRequestApproval && known.card_bound_at
+    ? 'approval_already_bound'
+    : 'approval_' + state;
+  let output = String(error?.message || error || '');
+  if (state === 'expired') {
+    output = 'This approval card expired before resolution. The frozen owner action was not dispatched.';
+  } else if (state === 'superseded') {
+    output = 'This approval was invalidated by a WCM approval-policy change. The frozen owner action was not dispatched.';
+  } else if (state === 'consumed') {
+    output = 'This approval was already consumed. The frozen owner action will not be dispatched again.';
+  } else if (state === 'denied') {
+    output = 'This approval was already denied. The frozen owner action was not dispatched.';
+  } else if (state === 'pending' && known.card_bound_at && isRequestApproval) {
+    output = 'Approval request is already bound to an approval card. Its nonce and requested grant duration are unchanged.';
+  }
+  return structuredToolResult(approvalStatus({
+    classification,
+    approval_required: state === 'pending',
+    ...known,
+    owner: true,
+    queued: false,
+    default_duration_seconds: DEFAULT_APPROVAL_DURATION_SECONDS,
+    grant_scope: 'full_wcm',
+    grant_effect: 'all_routed_tools_all_registered_devices',
+    ...grantFields(grant),
+    action_state: state === 'pending' ? null : state,
+    action_failed: false,
+    output,
+  }), {
+    isError: state === 'pending',
+  });
 }
 
 function enforceToolResultSize(result, payload) {
@@ -486,6 +551,10 @@ async function executeTool(payload, sourcePayload = null) {
       });
       return approvalCardResult(prepared);
     } catch (error) {
+      const retained = retainedApprovalResult(args.approval_id, error, {
+        isRequestApproval: true,
+      });
+      if (retained) return retained;
       return structuredToolResult(approvalStatus({
         classification: 'approval_error',
         approval_required: false,
@@ -498,7 +567,11 @@ async function executeTool(payload, sourcePayload = null) {
         tool_name: null,
         action_summary: null,
         intent_sha256: null,
+        created_at: null,
+        card_bound_at: null,
+        card_expires_at: null,
         pending_expires_at: null,
+        terminal_reason: null,
         default_duration_seconds: DEFAULT_APPROVAL_DURATION_SECONDS,
         requested_duration_seconds: null,
         grant_scope: 'full_wcm',
@@ -624,6 +697,8 @@ async function executeTool(payload, sourcePayload = null) {
         }));
       }
     } catch (error) {
+      const retained = retainedApprovalResult(args.approval_id, error);
+      if (retained) return retained;
       return structuredToolResult(approvalStatus({
         classification: 'approval_error',
         approval_required: false,
@@ -636,7 +711,11 @@ async function executeTool(payload, sourcePayload = null) {
         tool_name: null,
         action_summary: null,
         intent_sha256: null,
+        created_at: null,
+        card_bound_at: null,
+        card_expires_at: null,
         pending_expires_at: null,
+        terminal_reason: null,
         default_duration_seconds: DEFAULT_APPROVAL_DURATION_SECONDS,
         requested_duration_seconds: null,
         grant_scope: 'full_wcm',

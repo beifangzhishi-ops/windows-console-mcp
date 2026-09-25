@@ -42,6 +42,15 @@ assert.equal(requestCard._meta?.['openai/widgetAccessible'], true);
 assert.deepEqual(resolver._meta?.ui?.visibility, ['app']);
 assert.equal(resolver.inputSchema.properties.approval_nonce.minLength, 20);
 assert.equal(resolver.inputSchema.properties.duration_seconds, undefined);
+for (const field of [
+  'created_at',
+  'card_bound_at',
+  'card_expires_at',
+  'pending_expires_at',
+  'terminal_reason',
+]) {
+  assert.ok(requestCard.outputSchema.properties[field], `approval output is missing ${field}`);
+}
 
 const listed = localApprovalResource({ method: 'resources/list', params: {} });
 assert.deepEqual(listed.result.resources.map((item) => item.uri), [APPROVAL_UI_URI]);

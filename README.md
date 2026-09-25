@@ -60,10 +60,12 @@ The router adds `list_devices` and requires `deviceId` on every Desktop Commande
 
 WCM has two local approval modes:
 
-- `timed` (default): when no active grant exists, the first routed tool call is frozen server-side and returns `approval_required=true` with an opaque `approval_id`. Call `request_approval` with that ID and an optional `duration_seconds`; omitting it requests 21600 seconds (6 hours). Approve grants the whole WCM Router instance timed access to all routed tools and registered devices, then dispatches only the frozen owner action once. Deny dispatches nothing. The grant is absolute, does not slide on use, lives only in Router memory, and disappears on expiry, revoke, policy change, or restart.
+- `timed` (default): when no active grant exists, the first routed tool call is frozen server-side and returns `approval_required=true` with an opaque `approval_id`. An unbound frozen action is valid for 15 minutes. Calling `request_approval` binds the approval card and starts a separate 6-hour card-validity window. Its optional `duration_seconds` controls only the post-approval full-access grant; omitting it requests 21600 seconds (6 hours). Approve starts that grant at approval time, grants the whole WCM Router instance timed access to all routed tools and registered devices, then dispatches only the frozen owner action once. Deny dispatches nothing. The grant is absolute, does not slide on use, lives only in Router memory, and disappears on expiry, revoke, policy change, or restart.
 - `off`: routed tools execute directly without approval cards.
 
-`duration_seconds` is accepted only by `request_approval`, not by ordinary worker tools or the app-only resolver. Valid values are whole seconds from 60 through 604800 (7 days). Once a card is bound, its duration cannot be changed and its hidden nonce is never reissued.
+`duration_seconds` is accepted only by `request_approval`, not by ordinary worker tools or the app-only resolver. Valid values are whole seconds from 60 through 604800 (7 days). It is independent of card validity: a 60-second grant request still has the normal 6-hour card window, and the 60-second grant starts only after approval. Once a card is bound, its duration cannot be changed and its hidden nonce is never reissued.
+
+Expired and policy-invalidated approval records are retained briefly as terminal state so a late card callback can report `expired` or `superseded` for the same `approval_id` instead of immediately collapsing to an unknown ID. `list_devices` exposes whether the active pending request is card-bound and its current expiry timestamp.
 
 The local mode/revoke helper is:
 
@@ -143,7 +145,7 @@ When a live WCM deployment behaves differently from the checked-out code, debug 
 
 WCM can execute commands and access files on registered devices. Expose only the OAuth-protected sidecar through your HTTPS ingress; keep the router and worker hubs private to localhost/Tailscale. Remote worker admission relies on the registered Tailscale source IP, so treat your tailnet and `config/devices.json` as part of the trust boundary.
 
-The owner action is frozen server-side before the card is shown. The one-time approval nonce is delivered only in the tool result `_meta`, compared timing-safely, bound to the Host session when available, and never accepted as a replacement for the frozen action. Pending approval and active grants are memory-only. Timed WCM access skips only the Router approval gate; it does not bypass OAuth, device admission, registered-device routing, or Desktop Commander safety rules.
+The owner action is frozen server-side before the card is shown. The one-time approval nonce is delivered only in the tool result `_meta`, compared timing-safely, bound to the Host session when available, and never accepted as a replacement for the frozen action. Unbound action validity, bound-card validity, and post-approval grant duration are separate clocks. Pending approval, retained terminal approval state, and active grants are memory-only and are cleared by Router restart. Timed WCM access skips only the Router approval gate; it does not bypass OAuth, device admission, registered-device routing, or Desktop Commander safety rules.
 
 Secrets, OAuth state, worker-local configuration, runtime logs, and `node_modules` are excluded from Git. Never commit the generated `config/rdc.env`, `config/approval-policy.json`, `config/devices.json`, `config/worker-*.env`, or `.state/` contents.
 

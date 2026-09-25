@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 
-export const DEFAULT_PENDING_APPROVAL_TTL_MS = 15 * 60 * 1000;
+export const DEFAULT_UNBOUND_APPROVAL_TTL_MS = 15 * 60 * 1000;
+export const DEFAULT_BOUND_APPROVAL_TTL_MS = 6 * 60 * 60 * 1000;
 const TERMINAL_RETENTION_MS = 5 * 60 * 1000;
 
 function hashIntent(intent) {
@@ -23,13 +24,17 @@ function iso(value) {
 
 export class PendingActionManager {
   constructor({
-    ttlMs = DEFAULT_PENDING_APPROVAL_TTL_MS,
+    unboundTtlMs = DEFAULT_UNBOUND_APPROVAL_TTL_MS,
+    boundTtlMs = DEFAULT_BOUND_APPROVAL_TTL_MS,
     now = () => Date.now(),
     audit = null,
   } = {}) {
-    this.ttlMs = Number.isFinite(Number(ttlMs)) && Number(ttlMs) > 0
-      ? Number(ttlMs)
-      : DEFAULT_PENDING_APPROVAL_TTL_MS;
+    this.unboundTtlMs = Number.isFinite(Number(unboundTtlMs)) && Number(unboundTtlMs) > 0
+      ? Number(unboundTtlMs)
+      : DEFAULT_UNBOUND_APPROVAL_TTL_MS;
+    this.boundTtlMs = Number.isFinite(Number(boundTtlMs)) && Number(boundTtlMs) > 0
+      ? Number(boundTtlMs)
+      : DEFAULT_BOUND_APPROVAL_TTL_MS;
     this.now = now;
     this.audit = audit;
     this.requests = new Map();
@@ -44,17 +49,36 @@ export class PendingActionManager {
       operation_id: request?.operationId || null,
       state: request?.state || null,
       intent_sha256: request?.intentHash || null,
+      created_at: iso(request?.createdAt),
+      card_bound_at: iso(request?.cardBoundAt),
+      card_expires_at: iso(request?.cardExpiresAt),
+      terminal_reason: request?.terminalReason || null,
       ...extra,
     });
+  }
+
+  pendingDeadline(request) {
+    return request?.cardBoundAt != null
+      ? request.cardExpiresAt
+      : request?.unboundExpiresAt;
   }
 
   prune() {
     const now = this.now();
     for (const [approvalId, request] of this.requests) {
-      if (request.state === 'pending' && request.expiresAt <= now) {
-        this.emit('expired', request);
+      const pendingDeadline = this.pendingDeadline(request);
+      if (
+        request.state === 'pending' &&
+        pendingDeadline != null &&
+        pendingDeadline <= now
+      ) {
+        request.state = 'expired';
+        request.expiredAt = now;
+        request.terminalReason = request.cardBoundAt != null
+          ? 'card_timeout'
+          : 'unbound_timeout';
         if (this.pendingApprovalId === approvalId) this.pendingApprovalId = null;
-        this.requests.delete(approvalId);
+        this.emit('expired', request);
         continue;
       }
       const terminalAt =
@@ -62,6 +86,7 @@ export class PendingActionManager {
         request.unknownAt ??
         request.retryableAt ??
         request.respondedAt ??
+        request.expiredAt ??
         request.supersededAt;
       if (
         request.state !== 'pending' &&
@@ -83,9 +108,15 @@ export class PendingActionManager {
       device_id: request.action.deviceId,
       tool_name: request.action.toolName,
       action_summary: request.action.summary,
-      pending_expires_at: iso(request.expiresAt),
+      created_at: iso(request.createdAt),
+      card_bound_at: iso(request.cardBoundAt),
+      card_expires_at: iso(request.cardExpiresAt),
+      pending_expires_at: request.state === 'pending'
+        ? iso(this.pendingDeadline(request))
+        : null,
       requested_duration_seconds: request.requestedDurationSeconds ?? null,
       intent_sha256: request.intentHash,
+      terminal_reason: request.terminalReason || null,
     };
   }
 
@@ -134,10 +165,13 @@ export class PendingActionManager {
       intentHash: hashIntent(intent),
       action,
       createdAt,
-      expiresAt: createdAt + this.ttlMs,
+      unboundExpiresAt: createdAt + this.unboundTtlMs,
+      cardBoundAt: null,
+      cardExpiresAt: null,
       requestedDurationSeconds: null,
       approvalNonceHash: null,
       hostSession: null,
+      terminalReason: null,
     };
     this.requests.set(request.approvalId, request);
     this.pendingApprovalId = request.approvalId;
@@ -168,7 +202,8 @@ export class PendingActionManager {
     const approvalNonce = crypto.randomBytes(32).toString('base64url');
     request.approvalNonceHash = hashSecret(approvalNonce);
     request.hostSession = hostSession ? String(hostSession) : null;
-    request.appBoundAt = this.now();
+    request.cardBoundAt = this.now();
+    request.cardExpiresAt = request.cardBoundAt + this.boundTtlMs;
     this.emit('app_bound', request, {
       requested_duration_seconds: requestedDurationSeconds,
     });
@@ -223,6 +258,7 @@ export class PendingActionManager {
     this.assertAppRequest(request, approvalNonce, hostSession);
     request.state = 'denied';
     request.respondedAt = this.now();
+    request.terminalReason = 'user_denied';
     if (this.pendingApprovalId === request.approvalId) this.pendingApprovalId = null;
     this.emit('responded', request, { decision: 'deny' });
     return this.publicRequest(request);
@@ -262,8 +298,15 @@ export class PendingActionManager {
     if (!request || request.state !== 'pending') return null;
     request.state = 'superseded';
     request.supersededAt = this.now();
+    request.terminalReason = reason;
     this.emit('superseded', request, { reason });
     return this.publicRequest(request);
+  }
+
+  lookup(approvalId) {
+    this.prune();
+    const request = this.requests.get(String(approvalId || ''));
+    return request ? this.publicRequest(request) : null;
   }
 
   snapshot() {

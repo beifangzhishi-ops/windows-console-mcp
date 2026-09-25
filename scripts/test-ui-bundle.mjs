@@ -28,6 +28,9 @@ for (const marker of [
   'notifyIntrinsicHeight',
   'sendFollowUpMessage',
   'hidden.approval_nonce',
+  'card_expires_at',
+  'Valid until',
+  'approval_already_bound',
 ]) {
   assert.ok(html.includes(marker), `approval HTML is missing CCM-aligned marker: ${marker}`);
 }

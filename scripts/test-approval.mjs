@@ -4,7 +4,11 @@ import {
   validateApprovalDurationSeconds,
 } from '../router/approval-policy.mjs';
 import { approvalFailureState } from '../router/approval-execution-state.mjs';
-import { PendingActionManager } from '../router/pending-action-manager.mjs';
+import {
+  DEFAULT_BOUND_APPROVAL_TTL_MS,
+  DEFAULT_UNBOUND_APPROVAL_TTL_MS,
+  PendingActionManager,
+} from '../router/pending-action-manager.mjs';
 import { TimedGrantManager } from '../router/timed-grant-manager.mjs';
 import { APPROVAL_UI_HTML, APPROVAL_UI_URI } from '../router/approval-app.mjs';
 
@@ -29,6 +33,11 @@ assert.equal(first.owner, true);
 assert.equal(first.request.state, 'pending');
 assert.equal(first.request.approval_required, true);
 assert.match(first.request.intent_sha256, /^[a-f0-9]{64}$/u);
+assert.ok(first.request.created_at);
+assert.equal(first.request.card_bound_at, null);
+assert.equal(first.request.card_expires_at, null);
+const firstUnboundExpiry = Date.parse(first.request.pending_expires_at);
+assert.equal(firstUnboundExpiry - now, DEFAULT_UNBOUND_APPROVAL_TTL_MS);
 
 const concurrent = pendingManager.ensurePending({
   deviceId: 'device-b',
@@ -45,6 +54,14 @@ const prepared = pendingManager.prepareAppApproval(first.request.approval_id, {
 });
 assert.equal(prepared.request.requested_duration_seconds, 7200);
 assert.ok(prepared.approvalNonce.length >= 20);
+assert.ok(prepared.request.card_bound_at);
+assert.ok(prepared.request.card_expires_at);
+assert.equal(
+  Date.parse(prepared.request.card_expires_at) - Date.parse(prepared.request.card_bound_at),
+  DEFAULT_BOUND_APPROVAL_TTL_MS,
+);
+assert.equal(prepared.request.pending_expires_at, prepared.request.card_expires_at);
+assert.ok(Date.parse(prepared.request.pending_expires_at) > firstUnboundExpiry);
 assert.throws(
   () => pendingManager.prepareAppApproval(first.request.approval_id, {
     hostSession: 'host-a',
@@ -61,6 +78,7 @@ assert.throws(
   /different host session/u,
 );
 
+now = firstUnboundExpiry + 1;
 const claimed = pendingManager.claim(
   first.request.approval_id,
   prepared.approvalNonce,
@@ -111,12 +129,68 @@ const expiring = pendingManager.ensurePending({
   workerArguments: { path: 'C:\\x.txt' },
 });
 now = Date.parse(expiring.request.pending_expires_at);
+const expired = pendingManager.lookup(expiring.request.approval_id);
+assert.equal(expired.state, 'expired');
+assert.equal(expired.terminal_reason, 'unbound_timeout');
 assert.throws(
   () => pendingManager.prepareAppApproval(expiring.request.approval_id, {
     requestedDurationSeconds: 60,
   }),
-  /Unknown or expired approval_id/u,
+  /state=expired/u,
 );
+
+const boundExpiryManager = new PendingActionManager({
+  now: () => now,
+  audit: (event) => audit.push(event),
+});
+const boundExpiryOwner = boundExpiryManager.ensurePending({
+  deviceId: 'device-a',
+  toolName: 'get_config',
+  workerArguments: {},
+});
+const boundExpiryPrepared = boundExpiryManager.prepareAppApproval(
+  boundExpiryOwner.request.approval_id,
+  {
+    hostSession: 'host-a',
+    requestedDurationSeconds: 60,
+  },
+);
+const frozenCardExpiry = boundExpiryPrepared.request.card_expires_at;
+assert.throws(
+  () => boundExpiryManager.prepareAppApproval(boundExpiryOwner.request.approval_id, {
+    hostSession: 'host-a',
+    requestedDurationSeconds: 60,
+  }),
+  /already bound/u,
+);
+const stillBound = boundExpiryManager.lookup(boundExpiryOwner.request.approval_id);
+assert.equal(stillBound.requested_duration_seconds, 60);
+assert.equal(stillBound.card_expires_at, frozenCardExpiry);
+now = Date.parse(frozenCardExpiry);
+const boundExpired = boundExpiryManager.lookup(boundExpiryOwner.request.approval_id);
+assert.equal(boundExpired.state, 'expired');
+assert.equal(boundExpired.terminal_reason, 'card_timeout');
+assert.throws(
+  () => boundExpiryManager.deny(
+    boundExpiryOwner.request.approval_id,
+    boundExpiryPrepared.approvalNonce,
+    'host-a',
+  ),
+  /state=expired/u,
+);
+
+const supersedeManager = new PendingActionManager({ now: () => now });
+const supersededOwner = supersedeManager.ensurePending({
+  deviceId: 'device-a',
+  toolName: 'get_config',
+  workerArguments: {},
+});
+supersedeManager.prepareAppApproval(supersededOwner.request.approval_id, {
+  requestedDurationSeconds: 60,
+});
+const superseded = supersedeManager.clearPending('policy_changed');
+assert.equal(superseded.state, 'superseded');
+assert.equal(superseded.terminal_reason, 'policy_changed');
 
 assert.equal(validateApprovalDurationSeconds(), 21600);
 assert.equal(validateApprovalDurationSeconds(120), 120);
@@ -152,5 +226,6 @@ assert.ok(audit.some((event) => event.event === 'requested'));
 assert.ok(audit.some((event) => event.event === 'app_bound'));
 assert.ok(audit.some((event) => event.event === 'grant_created'));
 assert.ok(audit.some((event) => event.event === 'grant_expired'));
+assert.ok(audit.some((event) => event.event === 'expired' && event.terminal_reason === 'card_timeout'));
 
 console.log('WCM timed approval manager/app tests: PASS');
