@@ -60,10 +60,10 @@ The router adds `list_devices` and requires `deviceId` on every Desktop Commande
 
 WCM has two local approval modes:
 
-- `timed` (default): every ordinary routed worker-tool call is frozen independently and returns `approval_required=true` with a fresh opaque `approval_id`. An unbound frozen action is valid for 15 minutes. Calling `request_approval` binds that ID to an approval card and starts a separate 6-hour card-validity window. Its optional `duration_seconds` controls only that ID's post-approval full-WCM grant; omitting it requests 21600 seconds (6 hours). Approve starts the grant at approval time and dispatches only that ID's frozen owner action once. Deny dispatches nothing. Different IDs never block, replace, or supersede one another, so multiple approved IDs may remain active concurrently with independent expiry times.
+- `timed` (default): every ordinary routed worker-tool call is frozen independently and returns `approval_required=true` with a fresh opaque `approval_id`. An unbound frozen action is valid for 15 minutes. Calling `request_approval` binds that ID to an approval card and starts a separate 3-day (72-hour) card-validity window. Its optional `duration_seconds` controls only that ID's post-approval full-WCM grant; omitting it requests 21600 seconds (6 hours). Approve starts the grant at approval time and dispatches only that ID's frozen owner action once. Deny dispatches nothing. Different IDs never block, replace, or supersede one another, so multiple approved IDs may remain active concurrently with independent expiry times.
 - `off`: routed tools execute directly without approval cards.
 
-`duration_seconds` is accepted only by `request_approval`, not by ordinary worker tools or the app-only resolver. Valid values are whole seconds from 60 through 604800 (7 days). It is independent of card validity: a 60-second grant request still has the normal 6-hour card window, and the 60-second grant starts only after approval. Once a card is bound, its duration cannot be changed and its hidden nonce is never reissued.
+`duration_seconds` is accepted only by `request_approval`, not by ordinary worker tools or the app-only resolver. Valid values are whole seconds from 60 through 604800 (7 days). It is independent of card validity: a 60-second grant request still has the normal 3-day card window, and the 60-second grant starts only after approval. Once a card is bound, its duration cannot be changed and its hidden nonce is never reissued.
 
 Approved IDs are reused through the Router-local `call_with_approval` tool:
 

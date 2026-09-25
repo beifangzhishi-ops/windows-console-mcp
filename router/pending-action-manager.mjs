@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 
 export const DEFAULT_UNBOUND_APPROVAL_TTL_MS = 15 * 60 * 1000;
-export const DEFAULT_BOUND_APPROVAL_TTL_MS = 6 * 60 * 60 * 1000;
+export const DEFAULT_BOUND_APPROVAL_TTL_MS = 3 * 24 * 60 * 60 * 1000;
 export const DEFAULT_TERMINAL_RETENTION_MS = 6 * 60 * 60 * 1000;
 export const DEFAULT_TERMINAL_RETENTION_LIMIT = 1000;
 
