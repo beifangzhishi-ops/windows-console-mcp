@@ -3,15 +3,19 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { loadConfig } from '../rdc-sidecar/config.mjs';
 import { createPkceChallenge } from '../rdc-sidecar/oauth.mjs';
-import { APPROVAL_TEST_UI_URI } from '../router/approval-test-routing.mjs';
+import { APPROVAL_UI_URI } from '../router/approval-routing.mjs';
 
 const config = loadConfig(process.cwd());
 const sidecarBase = process.env.RDC_E2E_BASE_URL || `http://${config.host}:${config.port}`;
 const localRouterUrl = new URL(process.env.WCM_SDK_ROUTER_URL || 'http://127.0.0.1:18009/mcp');
 const sdkResource = config.resource;
-const sdkAliasResource = new URL('/rdc/mcp-ccm', config.resource).toString();
 const redirectUri = 'http://127.0.0.1:19003/rdc-sdk-e2e-callback';
 let stage = 'startup';
+const approvalDecision = process.env.RDC_E2E_APPROVAL_DECISION || 'deny';
+const approvalDurationSeconds = Number(process.env.RDC_E2E_APPROVAL_DURATION_SECONDS || 120);
+const omitApprovalDuration = process.env.RDC_E2E_OMIT_APPROVAL_DURATION === '1';
+const expectedApprovalDurationSeconds = omitApprovalDuration ? 21600 : approvalDurationSeconds;
+let approvalFlowExercised = false;
 
 async function request(path, options = {}) {
   const response = await fetch(sidecarBase + path, { redirect: 'manual', ...options });
@@ -40,12 +44,6 @@ async function getAccessToken(approvalSecret) {
   if (metadata.json?.resource !== sdkResource) {
     throw new Error(`SDK resource metadata mismatch: ${metadata.json?.resource}`);
   }
-  const aliasMetadata = await request('/.well-known/oauth-protected-resource/rdc/mcp-ccm');
-  requireStatus(aliasMetadata, 200);
-  if (aliasMetadata.json?.resource !== sdkAliasResource) {
-    throw new Error(`SDK alias resource metadata mismatch: ${aliasMetadata.json?.resource}`);
-  }
-
   stage = 'registration';
   const registration = await request('/rdc/register', {
     method: 'POST',
@@ -142,19 +140,22 @@ async function connectClient(url, accessToken = null) {
 
 async function verifySurface(client, { exerciseApproval = false } = {}) {
   const tools = (await client.listTools()).tools;
-  for (const name of ['list_devices', 'approval_test_exec', 'request_approval', 'resolve_pending_action']) {
+  for (const name of ['list_devices', 'request_approval', 'resolve_pending_action']) {
     if (!tools.some((tool) => tool.name === name)) throw new Error(`SDK tools/list is missing ${name}.`);
   }
   const requestApproval = tools.find((tool) => tool.name === 'request_approval');
-  if (requestApproval?._meta?.['openai/outputTemplate'] !== APPROVAL_TEST_UI_URI) {
+  if (requestApproval?._meta?.['openai/outputTemplate'] !== APPROVAL_UI_URI) {
     throw new Error('request_approval outputTemplate mismatch.');
+  }
+  if (requestApproval?.inputSchema?.properties?.duration_seconds?.default !== 21600) {
+    throw new Error('request_approval duration_seconds default mismatch.');
   }
 
   const resources = (await client.listResources()).resources;
-  if (!resources.some((resource) => resource.uri === APPROVAL_TEST_UI_URI)) {
+  if (resources.length !== 1 || resources[0]?.uri !== APPROVAL_UI_URI) {
     throw new Error('SDK resources/list is missing the WCM approval View.');
   }
-  const read = await client.readResource({ uri: APPROVAL_TEST_UI_URI });
+  const read = await client.readResource({ uri: APPROVAL_UI_URI });
   const content = read.contents?.[0];
   if (content?.mimeType !== 'text/html;profile=mcp-app' ||
       !String(content?.text || '').includes('name: "resolve_pending_action"')) {
@@ -168,33 +169,109 @@ async function verifySurface(client, { exerciseApproval = false } = {}) {
   if (!deviceId) throw new Error('list_devices did not return a target device.');
 
   const ordinary = await client.callTool({ name: 'get_config', arguments: { deviceId } });
-  if (ordinary.isError) throw new Error('ordinary get_config routing failed.');
+  if (deviceInfo.approval?.mode === 'off') {
+    if (approvalDecision === 'approve') {
+      throw new Error('approve E2E requested while WCM approval mode is off.');
+    }
+    if (ordinary.isError) throw new Error('ordinary get_config routing failed in off mode.');
+    return;
+  }
+  approvalFlowExercised = true;
+  if (ordinary.structuredContent?.approval_required !== true) {
+    throw new Error('timed mode get_config did not return approval_required=true.');
+  }
 
   const sessionMeta = { 'openai/session': 'wcm-sdk-e2e-session' };
-  const frozen = await client.callTool({
-    name: 'approval_test_exec',
-    arguments: { deviceId, justification: 'SDK transport E2E deny test.' },
-  });
-  const approvalId = frozen.structuredContent?.approval_id;
-  if (!approvalId) throw new Error('approval_test_exec did not return approval_id.');
+  const approvalId = ordinary.structuredContent?.approval_id;
+  if (!approvalId) throw new Error('gated get_config did not return approval_id.');
+  const approvalArguments = omitApprovalDuration
+    ? { approval_id: approvalId }
+    : { approval_id: approvalId, duration_seconds: approvalDurationSeconds };
   const card = await client.callTool({
     name: 'request_approval',
-    arguments: { approval_id: approvalId },
+    arguments: approvalArguments,
     _meta: sessionMeta,
   });
   const nonce = card._meta?.approval_nonce;
   if (!nonce) throw new Error('request_approval did not return hidden approval_nonce.');
-  const denied = await client.callTool({
+  const resolved = await client.callTool({
     name: 'resolve_pending_action',
-    arguments: { approval_id: approvalId, approval_nonce: nonce, decision: 'deny' },
+    arguments: { approval_id: approvalId, approval_nonce: nonce, decision: approvalDecision },
     _meta: sessionMeta,
   });
-  if (denied.structuredContent?.state !== 'denied') {
-    throw new Error('resolve_pending_action did not deny the frozen action.');
+  if (approvalDecision === 'deny') {
+    if (resolved.structuredContent?.state !== 'denied') {
+      throw new Error('resolve_pending_action did not deny the frozen action.');
+    }
+    return;
+  }
+  if (approvalDecision !== 'approve') {
+    throw new Error('RDC_E2E_APPROVAL_DECISION must be deny or approve.');
+  }
+  if (resolved.structuredContent?.grant_active !== true) {
+    throw new Error('approve did not create an active timed grant.');
+  }
+  if (resolved.structuredContent?.requested_duration_seconds !== expectedApprovalDurationSeconds) {
+    throw new Error('approve did not preserve the requested duration.');
+  }
+  if (resolved.structuredContent?.action_state !== 'consumed' ||
+      resolved.structuredContent?.action_failed === true) {
+    throw new Error('approved owner get_config did not complete exactly once.');
+  }
+
+  const usage = await client.callTool({
+    name: 'get_usage_stats',
+    arguments: { deviceId },
+  });
+  if (usage.structuredContent?.approval_required === true || usage.isError) {
+    throw new Error('active grant did not bypass approval for another routed tool.');
+  }
+
+  const secondDevice = deviceInfo.devices?.find((item) => item.online && item.deviceId !== deviceId)?.deviceId;
+  if (secondDevice) {
+    const crossDevice = await client.callTool({
+      name: 'get_config',
+      arguments: { deviceId: secondDevice },
+    });
+    if (crossDevice.structuredContent?.approval_required === true || crossDevice.isError) {
+      throw new Error('active grant did not cover another registered device.');
+    }
+  }
+
+  const status = await client.callTool({ name: 'list_devices', arguments: {} });
+  const statusInfo = JSON.parse(status.content?.[0]?.text || '{}');
+  if (statusInfo.approval?.grant_active !== true) {
+    throw new Error('list_devices did not report the active grant.');
+  }
+  if (statusInfo.approval?.requested_duration_seconds !== expectedApprovalDurationSeconds) {
+    throw new Error('list_devices reported the wrong grant duration.');
   }
 }
 
 async function main() {
+  stage = 'removed alias routes';
+  const removedAlias = await request('/rdc/mcp-ccm');
+  requireStatus(removedAlias, 404);
+  const removedAliasMetadata = await request('/.well-known/oauth-protected-resource/rdc/mcp-ccm');
+  requireStatus(removedAliasMetadata, 404);
+
+  stage = 'unauthenticated canonical MCP';
+  const unauthenticated = await request('/rdc/mcp', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: 'unauthenticated-e2e',
+      method: 'initialize',
+      params: {
+        protocolVersion: '2025-06-18',
+        capabilities: {},
+        clientInfo: { name: 'unauthenticated-e2e', version: '1.0.0' },
+      },
+    }),
+  });
+  requireStatus(unauthenticated, 401);
+
   stage = 'local router SDK transport';
   const local = await connectClient(localRouterUrl);
   try {
@@ -229,10 +306,15 @@ async function main() {
   console.log('router_sdk_streamable_http=PASS');
   console.log('sidecar_oauth_resource=PASS');
   console.log('refresh_token_rotation=PASS');
-  console.log('sidecar_sdk_alias_discovery=PASS');
   console.log('sidecar_sdk_session=PASS');
-  console.log('ordinary_direct_routing=PASS');
-  console.log('approval_deny_roundtrip=PASS');
+  console.log('removed_alias_routes=PASS');
+  console.log('oauth_gate=PASS');
+  console.log('approval_mode_routing=PASS');
+  if (approvalFlowExercised) {
+    console.log(`approval_${approvalDecision}_roundtrip=PASS`);
+  } else {
+    console.log('approval_off_direct_routing=PASS');
+  }
 }
 
 main().catch((error) => {

@@ -44,7 +44,6 @@ const REGISTER_PATH = '/rdc/register';
 const REVOKE_PATH = '/rdc/revoke';
 const CONSENT_PATH = '/rdc/oauth/consent';
 const MCP_PATH = '/rdc/mcp';
-const SDK_ALIAS_MCP_PATH = '/rdc/mcp-ccm';
 const REGISTRATION_WINDOW_MS = 10 * 60 * 1000;
 const REGISTRATION_MAX_ATTEMPTS = 20;
 const AUTHORIZATION_DISCOVERY_PATHS = new Set([
@@ -54,10 +53,6 @@ const AUTHORIZATION_DISCOVERY_PATHS = new Set([
 const RESOURCE_DISCOVERY_PATHS = new Set([
   '/.well-known/oauth-protected-resource/rdc/mcp',
   '/rdc/mcp/.well-known/oauth-protected-resource',
-]);
-const SDK_ALIAS_RESOURCE_DISCOVERY_PATHS = new Set([
-  '/.well-known/oauth-protected-resource/rdc/mcp-ccm',
-  '/rdc/mcp-ccm/.well-known/oauth-protected-resource',
 ]);
 
 function logMessage(logger, method, message) {
@@ -240,23 +235,13 @@ function parseBearerToken(request) {
   return match ? match[1] : null;
 }
 
-function resourceAtPath(config, pathname) {
-  const resource = new URL(config.resource);
-  return resource.origin + pathname;
-}
-
-function sdkAliasResource(config) {
-  return resourceAtPath(config, SDK_ALIAS_MCP_PATH);
-}
-
 function protectedResourceMetadataUrl(resource) {
   const url = new URL(resource);
   return `${url.origin}/.well-known/oauth-protected-resource${url.pathname}`;
 }
 
 function isSupportedResource(config, resource) {
-  return resource === config.resource ||
-    resource === sdkAliasResource(config);
+  return resource === config.resource;
 }
 
 function sendUnauthorized(response, config, resource = config.resource) {
@@ -567,10 +552,7 @@ async function handleRevocation(request, response, runtime) {
 function getUpstreamRequestPath(runtime, url) {
   const upstreamUrl = new URL(runtime.upstreamUrl);
   const basePath = upstreamUrl.pathname.replace(/\/+$/u, '');
-  const mcpPath = url.pathname === SDK_ALIAS_MCP_PATH
-    ? '/mcp-ccm'
-    : '/mcp';
-  return basePath + mcpPath + url.search;
+  return basePath + '/mcp' + url.search;
 }
 
 function buildUpstreamHeaders(sourceHeaders, body, sessionId = null) {
@@ -782,11 +764,8 @@ async function handleRequest(request, response, runtime) {
     });
     return;
   }
-  if ((RESOURCE_DISCOVERY_PATHS.has(url.pathname) || SDK_ALIAS_RESOURCE_DISCOVERY_PATHS.has(url.pathname)) && request.method === 'GET') {
-    const resource = SDK_ALIAS_RESOURCE_DISCOVERY_PATHS.has(url.pathname)
-      ? sdkAliasResource(runtime.config)
-      : runtime.config.resource;
-    sendJson(response, 200, buildProtectedResourceMetadata(runtime.config, resource), {
+  if (RESOURCE_DISCOVERY_PATHS.has(url.pathname) && request.method === 'GET') {
+    sendJson(response, 200, buildProtectedResourceMetadata(runtime.config, runtime.config.resource), {
       noStore: true,
       cors: true,
     });
@@ -814,10 +793,6 @@ async function handleRequest(request, response, runtime) {
   }
   if (url.pathname === MCP_PATH) {
     await handleProtectedSdkMcp(request, response, runtime, url, runtime.config.resource);
-    return;
-  }
-  if (url.pathname === SDK_ALIAS_MCP_PATH) {
-    await handleProtectedSdkMcp(request, response, runtime, url, sdkAliasResource(runtime.config));
     return;
   }
   sendJson(response, 404, { error: 'not_found' });

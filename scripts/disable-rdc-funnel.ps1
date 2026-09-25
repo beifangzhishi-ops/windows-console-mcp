@@ -1,7 +1,7 @@
 ﻿[CmdletBinding()]
 param([switch]$Apply)
 $ErrorActionPreference='Stop'
-$routes=@('/rdc/mcp','/rdc/mcp-ccm','/rdc/authorize','/rdc/token','/rdc/register','/rdc/revoke','/rdc/oauth/consent','/.well-known/oauth-authorization-server/rdc','/.well-known/oauth-protected-resource/rdc/mcp','/.well-known/oauth-protected-resource/rdc/mcp-ccm','/rdc/.well-known/oauth-authorization-server','/rdc/mcp/.well-known/oauth-protected-resource','/rdc/mcp-ccm/.well-known/oauth-protected-resource')
+$routes=@('/rdc/mcp','/rdc/authorize','/rdc/token','/rdc/register','/rdc/revoke','/rdc/oauth/consent','/.well-known/oauth-authorization-server/rdc','/.well-known/oauth-protected-resource/rdc/mcp','/rdc/.well-known/oauth-authorization-server','/rdc/mcp/.well-known/oauth-protected-resource')
 Write-Output 'RDC Funnel disable preview:'
 foreach($route in $routes){ Write-Output ("  tailscale funnel --https=443 --set-path={0} off" -f $route) }
 if(-not $Apply){ Write-Output 'Preview only. Re-run with -Apply to change Funnel.'; exit 0 }

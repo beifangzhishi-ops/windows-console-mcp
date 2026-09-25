@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
+import vm from 'node:vm';
 import {
-  APPROVAL_TEST_UI_HTML,
-  APPROVAL_TEST_UI_URI,
-} from '../router/approval-test-app.mjs';
+  APPROVAL_UI_HTML,
+  APPROVAL_UI_URI,
+} from '../router/approval-app.mjs';
 
-const html = APPROVAL_TEST_UI_HTML;
+const html = APPROVAL_UI_HTML;
 
-assert.equal(APPROVAL_TEST_UI_URI, 'ui://wcm/approval-v1.html');
+assert.equal(APPROVAL_UI_URI, 'ui://wcm/approval-v1.html');
 assert.match(html, /<div id="title">WCM approval<\/div>/);
 assert.match(html, /<script>\s*\(\(\) => \{/);
 assert.doesNotMatch(html, /type=["']module["']/i);
@@ -43,5 +44,9 @@ const scriptIndex = html.indexOf('<script>');
 assert.ok(bodyIndex >= 0 && cardIndex > bodyIndex);
 assert.ok(scriptIndex > cardIndex, 'approval bridge must execute after the card DOM');
 assert.equal((html.match(/<script>/g) || []).length, 1);
+
+const scriptMatch = html.match(/<script>([\s\S]*?)<\/script>/u);
+assert.ok(scriptMatch?.[1], 'approval HTML must contain one inline script body');
+assert.doesNotThrow(() => new vm.Script(scriptMatch[1], { filename: 'wcm-approval-inline.js' }));
 
 console.log('WCM CCM-aligned approval View checks: PASS');

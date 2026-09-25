@@ -11,7 +11,7 @@
   "scripts": {
     "postinstall": "node scripts/apply-desktop-commander-image-guard.mjs",
     "check:ui": "node scripts/test-ui-bundle.mjs",
-    "test": "npm run check:ui && node scripts/test-approval-test.mjs && node scripts/test-router-routing-contract.mjs && node scripts/test-self-contained.mjs",
+    "test": "npm run check:ui && node scripts/test-approval-policy.mjs && node scripts/test-approval.mjs && node scripts/test-router-routing-contract.mjs && node scripts/test-self-contained.mjs",
     "test:live": "npm run check:ui && node scripts/test-rdc-sdk-e2e.mjs",
     "test:all": "npm test && npm run test:live",
     "test:sdk": "npm run check:ui && node scripts/test-rdc-sdk-e2e.mjs"

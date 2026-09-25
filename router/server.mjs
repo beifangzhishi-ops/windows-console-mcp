@@ -26,13 +26,19 @@ import {
   stripDeviceRoutingArguments,
   withDeviceRoutingSchema,
 } from './device-routing.mjs';
-import { ApprovalTestManager } from './approval-test-manager.mjs';
 import {
-  APPROVAL_TEST_UI_URI,
-  approvalTestRouterTools,
-  localApprovalTestResource,
-  mergeApprovalTestResourceList,
-} from './approval-test-routing.mjs';
+  ApprovalPolicyStore,
+  DEFAULT_APPROVAL_DURATION_SECONDS,
+  validateApprovalDurationSeconds,
+} from './approval-policy.mjs';
+import { approvalFailureState } from './approval-execution-state.mjs';
+import { PendingActionManager } from './pending-action-manager.mjs';
+import { TimedGrantManager } from './timed-grant-manager.mjs';
+import {
+  APPROVAL_UI_URI,
+  approvalRouterTools,
+  localApprovalResource,
+} from './approval-routing.mjs';
 
 const ROUTER_HOST = process.env.WC_ROUTER_HOST || '127.0.0.1';
 const ROUTER_PORT = Number(process.env.WC_ROUTER_PORT || 18009);
@@ -41,7 +47,6 @@ const WORKER_PORT = Number(process.env.WC_WORKER_PORT || 18101);
 const WORKER_REMOTE_HOST = process.env.WC_WORKER_REMOTE_HOST || '';
 const WORKER_REMOTE_PORT = Number(process.env.WC_WORKER_REMOTE_PORT || 18100);
 const MCP_PATH = '/mcp';
-const SDK_ALIAS_MCP_PATH = '/mcp-ccm';
 const WORKER_PROTOCOL_VERSION = '2025-06-18';
 const MAX_BODY_BYTES = 1024 * 1024;
 const MAX_TOOL_RESULT_BYTES = resolveMaxRouterToolResultBytes(process.env.WC_MAX_TOOL_RESULT_BYTES);
@@ -62,9 +67,47 @@ const routerLogger = {
   log: (...values) => appendRouterTrace('INFO', values.map(String).join(' ')),
   error: (...values) => appendRouterTrace('ERROR', values.map(String).join(' ')),
 };
-const approvalTestManager = new ApprovalTestManager({
+const approvalPolicyStore = new ApprovalPolicyStore({
+  root: process.cwd(),
+  logger: routerLogger,
+});
+const pendingActionManager = new PendingActionManager({
   audit: (event) => appendRouterTrace('AUDIT', JSON.stringify(event)),
 });
+const timedGrantManager = new TimedGrantManager({
+  audit: (event) => appendRouterTrace('AUDIT', JSON.stringify(event)),
+});
+let approvalPolicy = approvalPolicyStore.current();
+
+function refreshApprovalPolicy() {
+  const refreshed = approvalPolicyStore.refresh();
+  if (refreshed.changed) {
+    timedGrantManager.clearAll('policy_changed');
+    pendingActionManager.clearPending('policy_changed');
+  }
+  approvalPolicy = refreshed.policy;
+  return approvalPolicy;
+}
+
+function approvalRuntimeSnapshot() {
+  const policy = refreshApprovalPolicy();
+  const pending = pendingActionManager.snapshot();
+  const grant = timedGrantManager.snapshot();
+  return {
+    mode: policy.mode,
+    policy_revision: policy.revision,
+    default_duration_seconds: DEFAULT_APPROVAL_DURATION_SECONDS,
+    pending: Boolean(pending),
+    pending_approval_id: pending?.approval_id || null,
+    pending_expires_at: pending?.pending_expires_at || null,
+    grant_active: Boolean(grant),
+    grant_approval_id: grant?.approval_id || null,
+    requested_duration_seconds: grant?.requested_duration_seconds || null,
+    grant_granted_at: grant?.granted_at || null,
+    grant_expires_at: grant?.expires_at || null,
+    grant_remaining_seconds: grant?.remaining_seconds || 0,
+  };
+}
 const hub = new WorkerHub({
   registry,
   host: WORKER_HOST,
@@ -231,30 +274,20 @@ function augmentTools(tools) {
       : `${capabilityHint}${stabilityHint}\n\n${WCM_TOOL_FAILURE_RULE}`.trim();
     return { ...baseTool, description, inputSchema };
   });
-  const plainAliases = [];
-  const readFileTool = routed.find((tool) => tool?.name === 'read_file');
-  if (readFileTool) {
-    const alias = structuredClone(readFileTool);
-    alias.name = 'read_file_plain';
-    alias.description = `Read file contents without any embedded UI template metadata.\n\n${WCM_TOOL_FAILURE_RULE}`;
-    delete alias._meta;
-    plainAliases.push(alias);
-  }
   return [
     {
       name: 'list_devices',
       description: `List Windows Console devices and their online status.\n\n${SPECIALIZED_CAPABILITIES}\n\n${WCM_ERROR_SEMANTICS}`,
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     },
-    ...plainAliases,
     ...routed,
   ];
 }
 
-function addApprovalTestTools(tools) {
+function addApprovalTools(tools) {
   return [
     tools[0],
-    ...approvalTestRouterTools(toolDeviceSchema()),
+    ...approvalRouterTools(),
     ...tools.slice(1),
   ];
 }
@@ -275,54 +308,79 @@ function structuredToolResult(data, { isError = false, meta = null, context = {}
   }, context);
 }
 
-function approvalTestStatus(value) {
+function grantFields(grant) {
+  return {
+    grant_active: Boolean(grant),
+    grant_approval_id: grant?.approval_id || null,
+    grant_granted_at: grant?.granted_at || null,
+    grant_expires_at: grant?.expires_at || null,
+    grant_remaining_seconds: grant?.remaining_seconds || 0,
+  };
+}
+
+function approvalStatus(value) {
   return {
     wall_time_seconds: 0,
-    kind: 'execution',
-    environment_id: value?.device_id,
+    kind: 'approval',
     ...value,
   };
 }
 
-function approvalTestPendingResult(value) {
-  const structured = approvalTestStatus({
-    ...value,
-    output: 'Approval required. Present the WCM approval card before executing the frozen hostname action.',
+function approvalPendingResult(pending, requestedTool) {
+  const structured = approvalStatus({
+    classification: 'approval_required',
+    approval_required: true,
+    approval_id: pending.request.approval_id,
+    operation_id: pending.request.operation_id,
+    state: pending.request.state,
+    owner: pending.owner,
+    queued: false,
+    device_id: requestedTool.deviceId,
+    tool_name: requestedTool.toolName,
+    action_summary: pending.owner
+      ? pending.request.action_summary
+      : 'Another WCM full-access approval is already pending.',
+    intent_sha256: pending.owner ? pending.request.intent_sha256 : null,
+    pending_expires_at: pending.request.pending_expires_at,
+    default_duration_seconds: DEFAULT_APPROVAL_DURATION_SECONDS,
+    requested_duration_seconds: null,
+    grant_scope: 'full_wcm',
+    grant_effect: 'all_routed_tools_all_registered_devices',
+    ...grantFields(null),
+    action_state: null,
+    action_failed: false,
+    output:
+      'Approval required. Call request_approval with this approval_id and optional duration_seconds. ' +
+      'Do not recreate or execute the frozen owner action yourself.',
   });
-  return classifyToolResult({
-    content: [{
-      type: 'text',
-      text: [
-        'WCM froze a test command for approval.',
-        'Approval ID: ' + structured.approval_id,
-        'Operation ID: ' + structured.operation_id,
-        'Device: ' + structured.device_id,
-        'Command: ' + structured.command,
-        'Expires: ' + structured.expires_at,
-        'Call request_approval with this approval_id to render the approval card. Do not run the command yourself.',
-      ].join('\n'),
-    }],
-    structuredContent: structured,
-  });
+  return structuredToolResult(structured);
 }
 
-function approvalTestCardResult(prepared) {
-  const value = approvalTestStatus({
+function approvalCardResult(prepared) {
+  const value = approvalStatus({
+    classification: 'approval_pending_user',
+    approval_required: true,
     ...prepared.request,
-    output: 'Waiting for the user to approve or deny this frozen WCM test command.',
+    owner: true,
+    queued: false,
+    default_duration_seconds: DEFAULT_APPROVAL_DURATION_SECONDS,
+    grant_scope: 'full_wcm',
+    grant_effect: 'all_routed_tools_all_registered_devices',
+    ...grantFields(null),
+    action_state: null,
+    action_failed: false,
+    output: 'Waiting for the user to approve or deny this timed WCM access request.',
   });
-  return classifyToolResult({
+  return {
     content: [{
       type: 'text',
       text: [
-        'WCM prepared a frozen test command for user approval.',
+        'WCM prepared a frozen owner action for user approval.',
         'Approval ID: ' + value.approval_id,
-        'Operation ID: ' + value.operation_id,
         'Device: ' + value.device_id,
-        'Command: ' + value.command,
-        'Expires: ' + value.expires_at,
-        'The attached WCM approval test card is the only valid approval path for this request.',
-        'Do not recreate or run this command yourself.',
+        'Tool: ' + value.tool_name,
+        'Requested duration: ' + value.requested_duration_seconds + ' seconds',
+        'The attached WCM approval card is the only valid approval path for this request.',
       ].join('\n'),
     }],
     structuredContent: value,
@@ -330,7 +388,7 @@ function approvalTestCardResult(prepared) {
       source: 'wcm.approval',
       approval_nonce: prepared.approvalNonce,
     },
-  });
+  };
 }
 
 function enforceToolResultSize(result, payload) {
@@ -343,13 +401,13 @@ function enforceToolResultSize(result, payload) {
   return classifyToolResult(guarded.result);
 }
 
-async function listTools(sourcePayload = null, { includeApproval = true } = {}) {
+async function listTools(sourcePayload = null) {
   const deviceId = registry.defaultDeviceId;
   const connection = hub.connectionInfo(deviceId);
   if (!connection) throw new Error('Worker is offline: ' + deviceId);
   const cached = toolListCache.get(connection.connectionId);
   if (cached) {
-    return includeApproval ? addApprovalTestTools(cached) : cached;
+    return addApprovalTools(cached);
   }
   const payload = {
     jsonrpc: '2.0',
@@ -365,32 +423,20 @@ async function listTools(sourcePayload = null, { includeApproval = true } = {}) 
   const current = hub.connectionInfo(deviceId);
   if (!current) throw new Error('Worker disconnected during tools/list: ' + deviceId);
   const cachedTools = toolListCache.set(current.connectionId, tools);
-  return includeApproval ? addApprovalTestTools(cachedTools) : cachedTools;
+  return addApprovalTools(cachedTools);
 }
 
-const RESOURCE_METHODS = new Set([
-  'resources/list', 'resources/read', 'resources/templates/list',
-]);
-
-async function forwardDefaultResource(payload, sourcePayload = null) {
+async function routeResource(payload) {
   const method = String(payload?.method || '');
-  if (!RESOURCE_METHODS.has(method)) throw new Error('Unsupported resource method: ' + method);
-  return callWorker(registry.defaultDeviceId, payload, sourcePayload);
-}
-
-async function routeResource(payload, sourcePayload = null, { includeApproval = true } = {}) {
-  const method = String(payload?.method || '');
-  const local = includeApproval ? localApprovalTestResource(payload) : null;
+  const local = localApprovalResource(payload);
   if (local) {
-    const bytes = Buffer.byteLength(local?.result?.contents?.[0]?.text || '', 'utf8');
-    appendRouterTrace('UI', `resource_read uri=${APPROVAL_TEST_UI_URI} bytes=${bytes}`);
+    if (method === 'resources/read' && local?.result?.contents?.[0]?.text) {
+      const bytes = Buffer.byteLength(local.result.contents[0].text, 'utf8');
+      appendRouterTrace('UI', `resource_read uri=${APPROVAL_UI_URI} bytes=${bytes}`);
+    }
     return local;
   }
-  const message = await forwardDefaultResource(payload, sourcePayload);
-  if (message?.error) return message;
-  if (method !== 'resources/list' || !includeApproval) return message;
-  appendRouterTrace('UI', `resource_list include=${APPROVAL_TEST_UI_URI}`);
-  return mergeApprovalTestResourceList(message);
+  throw new Error('Unsupported resource method: ' + method);
 }
 
 function selectedToolDevice(payload) {
@@ -415,151 +461,219 @@ function workerToolText(result) {
     .join('\n');
 }
 
-function approvalTestFailureState(error) {
-  const text = String(error?.message || error || '');
-  return /timed out|timeout/i.test(text) ? 'execution_unknown' : 'approved_retryable';
-}
-
-async function executeTool(payload, sourcePayload = null, { allowApproval = true } = {}) {
+async function executeTool(payload, sourcePayload = null) {
   const toolName = payload?.params?.name;
+
   if (toolName === 'list_devices') {
     return toolResult({
       defaultDeviceId: registry.defaultDeviceId,
       devices: hub.listStatus(),
+      approval: approvalRuntimeSnapshot(),
     });
   }
-  if (!allowApproval && ['approval_test_exec', 'request_approval', 'resolve_pending_action'].includes(toolName)) {
-    return structuredToolResult({
-      error: 'Approval-test tools are not available on the legacy MCP transport.',
-    }, { isError: true });
-  }
-  if (toolName === 'approval_test_exec') {
-    const args = payload?.params?.arguments || {};
-    const device = typeof args.deviceId === 'string' ? getDevice(args.deviceId) : null;
-    if (!device) {
-      return structuredToolResult({
-        error: args.deviceId
-          ? 'Unknown or disabled deviceId: ' + args.deviceId
-          : 'deviceId is required.',
-        devices: hub.listStatus(),
-      }, { isError: true });
-    }
-    try {
-      const pending = approvalTestManager.request({
-        deviceId: device.deviceId,
-        justification: args.justification,
-      });
-      return approvalTestPendingResult({
-        ...pending,
-        output: 'Approval required. Call request_approval with this approval_id to display the WCM test approval card.',
-      });
-    } catch (error) {
-      return structuredToolResult(
-        { error: String(error?.message || error) },
-        { isError: true },
-      );
-    }
-  }
+
   if (toolName === 'request_approval') {
     const args = payload?.params?.arguments || {};
     try {
-      const prepared = approvalTestManager.prepareAppApproval(args.approval_id, {
+      const policy = refreshApprovalPolicy();
+      if (policy.mode !== 'timed') {
+        throw new Error('WCM approval mode is off; no approval request is active.');
+      }
+      const requestedDurationSeconds = validateApprovalDurationSeconds(args.duration_seconds);
+      const prepared = pendingActionManager.prepareAppApproval(args.approval_id, {
         hostSession: hostSessionFor(payload, sourcePayload),
+        requestedDurationSeconds,
       });
-      return approvalTestCardResult(prepared);
+      return approvalCardResult(prepared);
     } catch (error) {
-      return structuredToolResult(
-        { error: String(error?.message || error) },
-        { isError: true },
-      );
+      return structuredToolResult(approvalStatus({
+        classification: 'approval_error',
+        approval_required: false,
+        approval_id: args.approval_id || null,
+        operation_id: null,
+        state: null,
+        owner: true,
+        queued: false,
+        device_id: null,
+        tool_name: null,
+        action_summary: null,
+        intent_sha256: null,
+        pending_expires_at: null,
+        default_duration_seconds: DEFAULT_APPROVAL_DURATION_SECONDS,
+        requested_duration_seconds: null,
+        grant_scope: 'full_wcm',
+        grant_effect: 'all_routed_tools_all_registered_devices',
+        ...grantFields(timedGrantManager.active()),
+        action_state: null,
+        action_failed: false,
+        output: String(error?.message || error),
+      }), { isError: true });
     }
   }
+
   if (toolName === 'resolve_pending_action') {
     const args = payload?.params?.arguments || {};
     const hostSession = hostSessionFor(payload, sourcePayload);
     try {
+      const policy = refreshApprovalPolicy();
       if (args.decision === 'deny') {
-        const denied = approvalTestManager.deny(
+        const denied = pendingActionManager.deny(
           args.approval_id,
           args.approval_nonce,
           hostSession,
         );
-        return structuredToolResult(approvalTestStatus({
+        return structuredToolResult(approvalStatus({
+          classification: 'approval_denied',
+          approval_required: false,
           ...denied,
-          output: 'The user denied the frozen WCM test command. It was not dispatched.',
+          owner: true,
+          queued: false,
+          default_duration_seconds: DEFAULT_APPROVAL_DURATION_SECONDS,
+          grant_scope: 'full_wcm',
+          grant_effect: 'all_routed_tools_all_registered_devices',
+          ...grantFields(null),
+          action_state: 'denied',
+          action_failed: false,
+          output: 'The user denied the frozen WCM owner action. It was not dispatched.',
         }));
       }
       if (args.decision !== 'approve') {
         throw new Error('decision must be approve or deny.');
       }
-      const claimed = approvalTestManager.claim(
+      if (policy.mode !== 'timed') {
+        throw new Error('WCM approval mode changed before this request was approved.');
+      }
+
+      const claimed = pendingActionManager.claim(
         args.approval_id,
         args.approval_nonce,
         hostSession,
       );
+      const grant = timedGrantManager.grant({
+        approvalId: args.approval_id,
+        requestedDurationSeconds: claimed.requestedDurationSeconds,
+        operationId: claimed.request.operation_id,
+        policyRevision: policy.revision,
+      });
+      const base = {
+        classification: 'approval_resolved',
+        approval_required: false,
+        ...claimed.request,
+        owner: true,
+        queued: false,
+        default_duration_seconds: DEFAULT_APPROVAL_DURATION_SECONDS,
+        requested_duration_seconds: claimed.requestedDurationSeconds,
+        grant_scope: 'full_wcm',
+        grant_effect: 'all_routed_tools_all_registered_devices',
+        ...grantFields(grant),
+      };
+
       const device = getDevice(claimed.action.deviceId);
       if (!device || !hub.connectionInfo(device.deviceId)) {
-        const retryable = approvalTestManager.markRetryable(args.approval_id);
-        return structuredToolResult(approvalTestStatus({
+        const retryable = pendingActionManager.markRetryable(args.approval_id);
+        return structuredToolResult(approvalStatus({
+          ...base,
           ...retryable,
-          output: 'The approved test command was not dispatched because the target worker is offline.',
+          action_state: 'approved_retryable',
+          action_failed: false,
+          output: 'The owner action was not dispatched because the target worker is offline. The timed WCM grant is active.',
         }));
       }
+
       const workerPayload = {
         jsonrpc: '2.0',
-        id: 'approval-test-' + randomUUID(),
+        id: 'approval-' + randomUUID(),
         method: 'tools/call',
         params: {
-          name: 'start_process',
-          arguments: {
-            command: claimed.action.command,
-            timeout_ms: claimed.action.timeoutMs,
-            ...(claimed.action.shell ? { shell: claimed.action.shell } : {}),
-          },
+          name: claimed.action.toolName,
+          arguments: claimed.action.workerArguments,
         },
       };
+
       try {
         const message = await callWorker(device.deviceId, workerPayload, sourcePayload);
-        const consumed = approvalTestManager.markConsumed(args.approval_id);
+        const consumed = pendingActionManager.markConsumed(args.approval_id);
         if (message.error) {
-          return structuredToolResult(approvalTestStatus({
+          return structuredToolResult(approvalStatus({
+            ...base,
             ...consumed,
+            action_state: 'consumed',
             action_failed: true,
             output: String(message.error?.message || JSON.stringify(message.error)),
           }));
         }
         const workerResult = message.result || {};
-        return structuredToolResult(approvalTestStatus({
+        return structuredToolResult(approvalStatus({
+          ...base,
           ...consumed,
-          output: workerToolText(workerResult) || 'Approved test command completed.',
+          action_state: 'consumed',
+          action_failed: false,
+          output: workerToolText(workerResult) || 'Approved owner action completed.',
         }));
       } catch (error) {
-        const state = approvalTestFailureState(error);
+        const state = approvalFailureState(error);
         const transitioned = state === 'execution_unknown'
-          ? approvalTestManager.markUnknown(args.approval_id)
-          : approvalTestManager.markRetryable(args.approval_id);
-        return structuredToolResult(approvalTestStatus({
+          ? pendingActionManager.markUnknown(args.approval_id)
+          : pendingActionManager.markRetryable(args.approval_id);
+        return structuredToolResult(approvalStatus({
+          ...base,
           ...transitioned,
+          action_state: state,
+          action_failed: false,
           output: String(error?.message || error),
         }));
       }
     } catch (error) {
-      return structuredToolResult(
-        { error: String(error?.message || error) },
-        { isError: true },
-      );
+      return structuredToolResult(approvalStatus({
+        classification: 'approval_error',
+        approval_required: false,
+        approval_id: args.approval_id || null,
+        operation_id: null,
+        state: null,
+        owner: true,
+        queued: false,
+        device_id: null,
+        tool_name: null,
+        action_summary: null,
+        intent_sha256: null,
+        pending_expires_at: null,
+        default_duration_seconds: DEFAULT_APPROVAL_DURATION_SECONDS,
+        requested_duration_seconds: null,
+        grant_scope: 'full_wcm',
+        grant_effect: 'all_routed_tools_all_registered_devices',
+        ...grantFields(timedGrantManager.active()),
+        action_state: null,
+        action_failed: false,
+        output: String(error?.message || error),
+      }), { isError: true });
     }
   }
+
   const { args, deviceId, device } = selectedToolDevice(payload);
   if (!device) {
     const detail = deviceId ? 'Unknown or disabled deviceId: ' + deviceId : 'deviceId is required.';
     return toolResult({ error: detail, devices: hub.listStatus() }, true);
   }
+
   const forwarded = stripModernMeta(payload);
   forwarded.params = { ...(forwarded.params || {}) };
-  if (forwarded.params.name === 'read_file_plain') forwarded.params.name = 'read_file';
   forwarded.params.arguments = stripDeviceRoutingArguments(args);
   forwarded.params.arguments = mapPathArguments(forwarded.params.arguments, device);
+
+  const policy = refreshApprovalPolicy();
+  if (policy.mode === 'timed' && !timedGrantManager.active()) {
+    const pending = pendingActionManager.ensurePending({
+      deviceId: device.deviceId,
+      toolName: forwarded.params.name,
+      workerArguments: forwarded.params.arguments,
+      summary: forwarded.params.name + ' on ' + device.deviceId,
+    });
+    return approvalPendingResult(pending, {
+      deviceId: device.deviceId,
+      toolName: forwarded.params.name,
+    });
+  }
+
   try {
     const message = await callWorker(device.deviceId, forwarded, sourcePayload);
     if (message.error) {
@@ -580,9 +694,8 @@ async function executeTool(payload, sourcePayload = null, { allowApproval = true
     }, true, { deviceOnline: Boolean(hub.connectionInfo(device.deviceId)) });
   }
 }
-
 function sdkInstructions() {
-  return `Every Desktop Commander tool requires an explicit deviceId. Ordinary WCM tools route directly to the selected worker and are not blocked by the approval test flow. approval_test_exec is an isolated test-only approval path for one frozen hostname action. Default device: ${registry.defaultDeviceId}.\n\n${SPECIALIZED_CAPABILITIES}\n\n${WCM_ERROR_SEMANTICS}`;
+  return `Every Desktop Commander tool requires an explicit deviceId. WCM approval mode is controlled locally. In timed mode, the first routed tool call without an active grant is frozen and returns approval_required=true; call request_approval with that approval_id and an optional duration_seconds (default 21600). A valid approval grants timed full WCM access for all routed tools and registered devices. In off mode, routed tools execute directly. list_devices reports the current approval state. Default device: ${registry.defaultDeviceId}.\n\n${SPECIALIZED_CAPABILITIES}\n\n${WCM_ERROR_SEMANTICS}`;
 }
 
 function unwrapRoutedResult(message, fallback) {
@@ -689,7 +802,7 @@ async function handleRequest(request, response) {
     });
     return;
   }
-  if (url.pathname !== MCP_PATH && url.pathname !== SDK_ALIAS_MCP_PATH) {
+  if (url.pathname !== MCP_PATH) {
     sendJson(response, 404, { error: 'not_found' });
     return;
   }

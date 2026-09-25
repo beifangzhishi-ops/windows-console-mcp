@@ -2,6 +2,7 @@ node_modules/
 .state/
 logs/
 config/rdc.env
+config/approval-policy.json
 *.log
 *.tmp
 .DS_Store

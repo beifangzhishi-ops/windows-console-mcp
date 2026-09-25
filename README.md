@@ -54,18 +54,27 @@ See [`worker/README.md`](worker/README.md) for the dedicated Docker worker insta
 
 ## Tool routing
 
-The router adds `list_devices` and requires `deviceId` on every Desktop Commander worker tool. Example targets are `local-pc` and `remote-worker`. After resolving the target worker, the router removes its own `deviceId` routing argument, applies configured path mappings, and forwards the remaining business arguments directly to Desktop Commander. Ordinary WCM tools are not gated by the approval feature.
+The router adds `list_devices` and requires `deviceId` on every Desktop Commander worker tool. Example targets are `local-pc` and `remote-worker`. After resolving the target worker, the router removes its own `deviceId` routing argument, applies configured path mappings, and forwards the remaining business arguments directly to Desktop Commander.
 
-The current approval work is isolated behind one test-only execution path:
+WCM has two local approval modes:
 
-1. Call `approval_test_exec` with an exact `deviceId`. WCM freezes one fixed read-only `hostname` test action and returns `approval_required=true` without executing it.
-2. Call `request_approval` with only the returned `approval_id`. This presents the MCP App card, generates the hidden one-time nonce, and binds the request to the host session when available.
-3. The card calls the app-only `resolve_pending_action` tool. Approve dispatches only the frozen command to the target worker through `start_process`; Deny does not dispatch it.
-4. The App writes the terminal result into model context and asks ChatGPT to continue without reconstructing the command.
+- `timed` (default): when no active grant exists, the first routed tool call is frozen server-side and returns `approval_required=true` with an opaque `approval_id`. Call `request_approval` with that ID and an optional `duration_seconds`; omitting it requests 21600 seconds (6 hours). Approve grants the whole WCM Router instance timed access to all routed tools and registered devices, then dispatches only the frozen owner action once. Deny dispatches nothing. The grant is absolute, does not slide on use, lives only in Router memory, and disappears on expiry, revoke, policy change, or restart.
+- `off`: routed tools execute directly without approval cards.
 
-The ChatGPT-facing approval surface follows the currently working CCM wire contract: approval tools and the approval resource are ordinary MCP tools/resources without a separate UI capability negotiation layer. `request_approval` carries `ui.resourceUri`, `ui/resourceUri`, `openai/outputTemplate`, and `openai/widgetAccessible`; `resolve_pending_action` is app-only and widget-accessible. Android approval rendering and both Deny and Approve flows have been verified on the SDK transport.
+`duration_seconds` is accepted only by `request_approval`, not by ordinary worker tools or the app-only resolver. Valid values are whole seconds from 60 through 604800 (7 days). Once a card is bound, its duration cannot be changed and its hidden nonce is never reissued.
 
-`/rdc/mcp-ccm` is retained temporarily as an SDK-transport alias for the already-deployed `mcpccm` ChatGPT registration. New or rebuilt WCM registrations should use the canonical `/rdc/mcp` endpoint.
+The local mode/revoke helper is:
+
+```powershell
+.\scripts\set-wcm-approval-mode.ps1 -Mode Timed
+.\scripts\set-wcm-approval-mode.ps1 -Mode Off
+.\scripts\set-wcm-approval-mode.ps1 -RevokeAll
+.\scripts\set-wcm-approval-mode.ps1 -Status
+```
+
+`-RevokeAll` increments the local policy revision; the Router sees that revision change on the next gate/status check and clears any in-memory pending request and active grant.
+
+The ChatGPT-facing approval surface follows the currently working CCM wire contract: approval tools and the approval resource are ordinary MCP tools/resources without a separate UI capability negotiation layer. `request_approval` carries `ui.resourceUri`, `ui/resourceUri`, `openai/outputTemplate`, and `openai/widgetAccessible`; `resolve_pending_action` is app-only and widget-accessible. The only public MCP endpoint is the canonical `/rdc/mcp`.
 
 The approval View is one static `String.raw` HTML document intentionally kept structurally aligned with CCM's current working approval View. It uses the same classic inline-script layout, `ui/initialize` / `ui/notifications/initialized` lifecycle, tool-result notifications, `tools/call`, `ui/update-model-context`, and ChatGPT `window.openai` globals (`toolResponseMetadata`, `toolOutput`, `openai:set_globals`, intrinsic-height notification, and follow-up continuation). The resource path is fixed at `ui://wcm/approval-v1.html`, matching CCM's fixed-URI pattern while keeping the WCM namespace distinct.
 
@@ -89,7 +98,7 @@ npm run test:live
 npm run test:sdk
 ```
 
-The live suite covers the canonical SDK Streamable HTTP endpoint, OAuth registration/PKCE/token refresh, the CCM-aligned ChatGPT approval surface, the isolated approval-test execution path, ordinary direct tool routing, device routing, resources, and session handling. It uses the configured OAuth deployment and can register test clients and exercise the frozen approval-test flow on the target worker, so it is intentionally separate from the default CI test.
+The live suite covers the canonical SDK Streamable HTTP endpoint, OAuth registration/PKCE/token refresh, the ChatGPT approval surface, timed/off routing behavior, device routing, the local approval UI resource, and session handling. It uses the configured OAuth deployment and can register test clients and exercise a real frozen approval flow on the target worker, so it is intentionally separate from the default CI test.
 
 The public endpoint is configured by `RDC_RESOURCE`. With a Tailscale Funnel hostname it typically looks like:
 
@@ -132,9 +141,9 @@ When a live WCM deployment behaves differently from the checked-out code, debug 
 
 WCM can execute commands and access files on registered devices. Expose only the OAuth-protected sidecar through your HTTPS ingress; keep the router and worker hubs private to localhost/Tailscale. Remote worker admission relies on the registered Tailscale source IP, so treat your tailnet and `config/devices.json` as part of the trust boundary.
 
-The approval-test action is frozen server-side before the card is shown. The one-time approval nonce is delivered only in the tool result `_meta`, is compared timing-safely, and is never accepted as a replacement for the frozen device or command. Pending approval state is memory-only.
+The owner action is frozen server-side before the card is shown. The one-time approval nonce is delivered only in the tool result `_meta`, compared timing-safely, bound to the Host session when available, and never accepted as a replacement for the frozen action. Pending approval and active grants are memory-only. Timed WCM access skips only the Router approval gate; it does not bypass OAuth, device admission, registered-device routing, or Desktop Commander safety rules.
 
-Secrets, OAuth state, worker-local configuration, runtime logs, and `node_modules` are excluded from Git. Never commit the generated `config/rdc.env`, `config/devices.json`, `config/worker-*.env`, or `.state/` contents.
+Secrets, OAuth state, worker-local configuration, runtime logs, and `node_modules` are excluded from Git. Never commit the generated `config/rdc.env`, `config/approval-policy.json`, `config/devices.json`, `config/worker-*.env`, or `.state/` contents.
 
 
 ## License
