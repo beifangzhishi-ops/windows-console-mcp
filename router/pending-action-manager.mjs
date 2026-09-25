@@ -2,7 +2,8 @@ import crypto from 'node:crypto';
 
 export const DEFAULT_UNBOUND_APPROVAL_TTL_MS = 15 * 60 * 1000;
 export const DEFAULT_BOUND_APPROVAL_TTL_MS = 6 * 60 * 60 * 1000;
-const TERMINAL_RETENTION_MS = 5 * 60 * 1000;
+export const DEFAULT_TERMINAL_RETENTION_MS = 6 * 60 * 60 * 1000;
+export const DEFAULT_TERMINAL_RETENTION_LIMIT = 1000;
 
 function hashIntent(intent) {
   return crypto.createHash('sha256').update(JSON.stringify(intent)).digest('hex');
@@ -26,6 +27,8 @@ export class PendingActionManager {
   constructor({
     unboundTtlMs = DEFAULT_UNBOUND_APPROVAL_TTL_MS,
     boundTtlMs = DEFAULT_BOUND_APPROVAL_TTL_MS,
+    terminalRetentionMs = DEFAULT_TERMINAL_RETENTION_MS,
+    terminalRetentionLimit = DEFAULT_TERMINAL_RETENTION_LIMIT,
     now = () => Date.now(),
     audit = null,
   } = {}) {
@@ -35,10 +38,15 @@ export class PendingActionManager {
     this.boundTtlMs = Number.isFinite(Number(boundTtlMs)) && Number(boundTtlMs) > 0
       ? Number(boundTtlMs)
       : DEFAULT_BOUND_APPROVAL_TTL_MS;
+    this.terminalRetentionMs = Number.isFinite(Number(terminalRetentionMs)) && Number(terminalRetentionMs) > 0
+      ? Number(terminalRetentionMs)
+      : DEFAULT_TERMINAL_RETENTION_MS;
+    this.terminalRetentionLimit = Number.isInteger(Number(terminalRetentionLimit)) && Number(terminalRetentionLimit) > 0
+      ? Number(terminalRetentionLimit)
+      : DEFAULT_TERMINAL_RETENTION_LIMIT;
     this.now = now;
     this.audit = audit;
     this.requests = new Map();
-    this.pendingApprovalId = null;
   }
 
   emit(event, request, extra = {}) {
@@ -63,9 +71,19 @@ export class PendingActionManager {
       : request?.unboundExpiresAt;
   }
 
+  terminalAt(request) {
+    return request?.consumedAt ??
+      request?.unknownAt ??
+      request?.retryableAt ??
+      request?.respondedAt ??
+      request?.expiredAt ??
+      request?.supersededAt ??
+      null;
+  }
+
   prune() {
     const now = this.now();
-    for (const [approvalId, request] of this.requests) {
+    for (const request of this.requests.values()) {
       const pendingDeadline = this.pendingDeadline(request);
       if (
         request.state === 'pending' &&
@@ -77,25 +95,27 @@ export class PendingActionManager {
         request.terminalReason = request.cardBoundAt != null
           ? 'card_timeout'
           : 'unbound_timeout';
-        if (this.pendingApprovalId === approvalId) this.pendingApprovalId = null;
         this.emit('expired', request);
         continue;
       }
-      const terminalAt =
-        request.consumedAt ??
-        request.unknownAt ??
-        request.retryableAt ??
-        request.respondedAt ??
-        request.expiredAt ??
-        request.supersededAt;
+      const terminalAt = this.terminalAt(request);
       if (
         request.state !== 'pending' &&
         request.state !== 'dispatching' &&
         terminalAt != null &&
-        terminalAt + TERMINAL_RETENTION_MS <= now
+        terminalAt + this.terminalRetentionMs <= now
       ) {
-        this.requests.delete(approvalId);
+        this.requests.delete(request.approvalId);
       }
+    }
+    const terminal = [...this.requests.values()]
+      .filter((request) => request.state !== 'pending' && request.state !== 'dispatching')
+      .map((request) => ({ request, terminalAt: this.terminalAt(request) }))
+      .filter((item) => item.terminalAt != null)
+      .sort((a, b) => a.terminalAt - b.terminalAt);
+    const excess = terminal.length - this.terminalRetentionLimit;
+    for (let index = 0; index < excess; index += 1) {
+      this.requests.delete(terminal[index].request.approvalId);
     }
   }
 
@@ -120,17 +140,6 @@ export class PendingActionManager {
     };
   }
 
-  currentPending() {
-    this.prune();
-    if (!this.pendingApprovalId) return null;
-    const request = this.requests.get(this.pendingApprovalId);
-    if (!request || request.state !== 'pending') {
-      this.pendingApprovalId = null;
-      return null;
-    }
-    return this.publicRequest(request);
-  }
-
   ensurePending({
     deviceId,
     toolName,
@@ -138,10 +147,6 @@ export class PendingActionManager {
     summary = '',
   }) {
     this.prune();
-    const existing = this.currentPending();
-    if (existing) {
-      return { request: existing, owner: false, queued: false };
-    }
     if (typeof deviceId !== 'string' || !deviceId) throw new Error('deviceId is required.');
     if (typeof toolName !== 'string' || !toolName) throw new Error('toolName is required.');
 
@@ -174,7 +179,6 @@ export class PendingActionManager {
       terminalReason: null,
     };
     this.requests.set(request.approvalId, request);
-    this.pendingApprovalId = request.approvalId;
     this.emit('requested', request);
     return { request: this.publicRequest(request), owner: true, queued: false };
   }
@@ -239,7 +243,6 @@ export class PendingActionManager {
     request.state = 'dispatching';
     request.approvedAt = this.now();
     request.dispatchStartedAt = this.now();
-    if (this.pendingApprovalId === request.approvalId) this.pendingApprovalId = null;
     this.emit('dispatching', request);
     return {
       request: this.publicRequest(request),
@@ -259,7 +262,6 @@ export class PendingActionManager {
     request.state = 'denied';
     request.respondedAt = this.now();
     request.terminalReason = 'user_denied';
-    if (this.pendingApprovalId === request.approvalId) this.pendingApprovalId = null;
     this.emit('responded', request, { decision: 'deny' });
     return this.publicRequest(request);
   }
@@ -290,17 +292,18 @@ export class PendingActionManager {
     return this.transition(approvalId, 'execution_unknown');
   }
 
-  clearPending(reason = 'policy_changed') {
+  clearPendingAll(reason = 'policy_changed') {
     this.prune();
-    if (!this.pendingApprovalId) return null;
-    const request = this.requests.get(this.pendingApprovalId);
-    this.pendingApprovalId = null;
-    if (!request || request.state !== 'pending') return null;
-    request.state = 'superseded';
-    request.supersededAt = this.now();
-    request.terminalReason = reason;
-    this.emit('superseded', request, { reason });
-    return this.publicRequest(request);
+    const cleared = [];
+    for (const request of this.requests.values()) {
+      if (request.state !== 'pending') continue;
+      request.state = 'superseded';
+      request.supersededAt = this.now();
+      request.terminalReason = reason;
+      this.emit('superseded', request, { reason });
+      cleared.push(this.publicRequest(request));
+    }
+    return cleared;
   }
 
   lookup(approvalId) {
@@ -310,6 +313,16 @@ export class PendingActionManager {
   }
 
   snapshot() {
-    return this.currentPending();
+    this.prune();
+    const pending = [...this.requests.values()].filter((request) => request.state === 'pending');
+    const deadlines = pending
+      .map((request) => this.pendingDeadline(request))
+      .filter((value) => value != null);
+    return {
+      pending_count: pending.length,
+      pending_bound_count: pending.filter((request) => request.cardBoundAt != null).length,
+      pending_unbound_count: pending.filter((request) => request.cardBoundAt == null).length,
+      nearest_pending_expires_at: deadlines.length ? iso(Math.min(...deadlines)) : null,
+    };
   }
 }

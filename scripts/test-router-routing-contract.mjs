@@ -28,9 +28,17 @@ assert.deepEqual(stripDeviceRoutingArguments({
 }), { value: 'forward-me' });
 
 const approvalTools = approvalRouterTools();
+const statusTool = approvalTools.find((tool) => tool.name === 'approval_status');
+const callWithApproval = approvalTools.find((tool) => tool.name === 'call_with_approval');
 const requestCard = approvalTools.find((tool) => tool.name === 'request_approval');
 const resolver = approvalTools.find((tool) => tool.name === 'resolve_pending_action');
-assert.ok(requestCard && resolver);
+assert.ok(statusTool && callWithApproval && requestCard && resolver);
+assert.deepEqual(statusTool.inputSchema.required, ['approval_id']);
+assert.deepEqual(
+  callWithApproval.inputSchema.required.sort(),
+  ['approval_id', 'deviceId', 'tool_name'].sort(),
+);
+assert.equal(callWithApproval.inputSchema.properties.arguments.type, 'object');
 assert.deepEqual(requestCard.inputSchema.required, ['approval_id']);
 assert.equal(requestCard.inputSchema.properties.duration_seconds.default, 21600);
 assert.equal(requestCard.inputSchema.properties.duration_seconds.minimum, 60);
@@ -48,6 +56,8 @@ for (const field of [
   'card_expires_at',
   'pending_expires_at',
   'terminal_reason',
+  'grant_state',
+  'usable',
 ]) {
   assert.ok(requestCard.outputSchema.properties[field], `approval output is missing ${field}`);
 }

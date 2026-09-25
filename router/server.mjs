@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { Server as McpProtocolServer } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {
@@ -70,9 +70,15 @@ const routerLogger = {
 };
 routerLogger.log(`Router instance started instance=${ROUTER_INSTANCE_ID} pid=${process.pid}`);
 function approvalAudit(event) {
+  const approvalId = event?.approval_id;
+  const safeEvent = { ...event };
+  delete safeEvent.approval_id;
   appendRouterTrace('AUDIT', JSON.stringify({
     router_instance_id: ROUTER_INSTANCE_ID,
-    ...event,
+    approval_fingerprint: approvalId
+      ? createHash('sha256').update(String(approvalId)).digest('hex').slice(0, 16)
+      : null,
+    ...safeEvent,
   }));
 }
 const approvalPolicyStore = new ApprovalPolicyStore({
@@ -100,7 +106,7 @@ function refreshApprovalPolicy() {
       source: refreshed.source,
     });
     timedGrantManager.clearAll('policy_changed');
-    pendingActionManager.clearPending('policy_changed');
+    pendingActionManager.clearPendingAll('policy_changed');
   }
   approvalPolicy = refreshed.policy;
   return approvalPolicy;
@@ -109,24 +115,13 @@ function refreshApprovalPolicy() {
 function approvalRuntimeSnapshot() {
   const policy = refreshApprovalPolicy();
   const pending = pendingActionManager.snapshot();
-  const grant = timedGrantManager.snapshot();
+  const grants = timedGrantManager.snapshot();
   return {
     mode: policy.mode,
     policy_revision: policy.revision,
     default_duration_seconds: DEFAULT_APPROVAL_DURATION_SECONDS,
-    pending: Boolean(pending),
-    pending_approval_id: pending?.approval_id || null,
-    pending_created_at: pending?.created_at || null,
-    pending_card_bound: Boolean(pending?.card_bound_at),
-    pending_card_bound_at: pending?.card_bound_at || null,
-    pending_card_expires_at: pending?.card_expires_at || null,
-    pending_expires_at: pending?.pending_expires_at || null,
-    grant_active: Boolean(grant),
-    grant_approval_id: grant?.approval_id || null,
-    requested_duration_seconds: grant?.requested_duration_seconds || null,
-    grant_granted_at: grant?.granted_at || null,
-    grant_expires_at: grant?.expires_at || null,
-    grant_remaining_seconds: grant?.remaining_seconds || 0,
+    ...pending,
+    ...grants,
   };
 }
 const hub = new WorkerHub({
@@ -330,12 +325,15 @@ function structuredToolResult(data, { isError = false, meta = null, context = {}
 }
 
 function grantFields(grant) {
+  const active = grant?.grant_state === 'active';
   return {
-    grant_active: Boolean(grant),
+    grant_active: active,
+    grant_state: grant?.grant_state || null,
     grant_approval_id: grant?.approval_id || null,
     grant_granted_at: grant?.granted_at || null,
     grant_expires_at: grant?.expires_at || null,
     grant_remaining_seconds: grant?.remaining_seconds || 0,
+    usable: active,
   };
 }
 
@@ -358,10 +356,8 @@ function approvalPendingResult(pending, requestedTool) {
     queued: false,
     device_id: requestedTool.deviceId,
     tool_name: requestedTool.toolName,
-    action_summary: pending.owner
-      ? pending.request.action_summary
-      : 'Another WCM full-access approval is already pending.',
-    intent_sha256: pending.owner ? pending.request.intent_sha256 : null,
+    action_summary: pending.request.action_summary,
+    intent_sha256: pending.request.intent_sha256,
     created_at: pending.request.created_at,
     card_bound_at: pending.request.card_bound_at,
     card_expires_at: pending.request.card_expires_at,
@@ -421,7 +417,7 @@ function retainedApprovalResult(approvalId, error, {
 } = {}) {
   const known = pendingActionManager.lookup(approvalId);
   if (!known) return null;
-  const grant = timedGrantManager.active();
+  const grant = timedGrantManager.inspect(approvalId);
   const state = known.state;
   const classification = state === 'pending' && isRequestApproval && known.card_bound_at
     ? 'approval_already_bound'
@@ -456,6 +452,51 @@ function retainedApprovalResult(approvalId, error, {
   });
 }
 
+function approvalIdStatusValue(approvalId) {
+  const request = pendingActionManager.lookup(approvalId);
+  const grant = timedGrantManager.inspect(approvalId);
+  const grantActive = grant?.grant_state === 'active';
+  let classification = 'approval_id_unknown';
+  if (grantActive) classification = 'approval_id_active';
+  else if (grant?.grant_state === 'expired') classification = 'approval_id_expired';
+  else if (grant?.grant_state === 'revoked') classification = 'approval_id_revoked';
+  else if (request?.state === 'pending' && request.card_bound_at) classification = 'approval_id_pending_bound';
+  else if (request?.state === 'pending') classification = 'approval_id_pending_unbound';
+  else if (request?.state) classification = 'approval_id_' + request.state;
+  const output = grantActive
+    ? 'This approval_id has an active timed full-WCM grant. Use call_with_approval to make authorized worker calls.'
+    : classification === 'approval_id_unknown'
+      ? 'Unknown approval_id. Call a normal WCM worker tool directly to create a fresh independent approval.'
+      : 'This approval_id is not currently usable. Call a normal WCM worker tool directly to create a fresh independent approval.';
+  return approvalStatus({
+    classification,
+    approval_required: request?.state === 'pending',
+    approval_id: approvalId || null,
+    operation_id: request?.operation_id || grant?.operation_id || null,
+    state: request?.state || null,
+    owner: true,
+    queued: false,
+    device_id: request?.device_id || null,
+    tool_name: request?.tool_name || null,
+    action_summary: request?.action_summary || null,
+    intent_sha256: request?.intent_sha256 || null,
+    created_at: request?.created_at || null,
+    card_bound_at: request?.card_bound_at || null,
+    card_expires_at: request?.card_expires_at || null,
+    pending_expires_at: request?.pending_expires_at || null,
+    terminal_reason: grant?.terminal_reason || request?.terminal_reason || null,
+    default_duration_seconds: DEFAULT_APPROVAL_DURATION_SECONDS,
+    requested_duration_seconds:
+      grant?.requested_duration_seconds ?? request?.requested_duration_seconds ?? null,
+    grant_scope: 'full_wcm',
+    grant_effect: 'all_routed_tools_all_registered_devices',
+    ...grantFields(grant),
+    action_state: request?.state && request.state !== 'pending' ? request.state : null,
+    action_failed: false,
+    output,
+  });
+}
+
 function enforceToolResultSize(result, payload) {
   const guarded = guardRouterToolResult(result, MAX_TOOL_RESULT_BYTES);
   if (guarded.blocked) {
@@ -466,14 +507,11 @@ function enforceToolResultSize(result, payload) {
   return classifyToolResult(guarded.result);
 }
 
-async function listTools(sourcePayload = null) {
-  const deviceId = registry.defaultDeviceId;
+async function routedToolsForDevice(deviceId, sourcePayload = null) {
   const connection = hub.connectionInfo(deviceId);
   if (!connection) throw new Error('Worker is offline: ' + deviceId);
   const cached = toolListCache.get(connection.connectionId);
-  if (cached) {
-    return addApprovalTools(cached);
-  }
+  if (cached) return cached;
   const payload = {
     jsonrpc: '2.0',
     id: 'worker-tools-' + randomUUID(),
@@ -487,8 +525,12 @@ async function listTools(sourcePayload = null) {
   const tools = augmentTools(message.result.tools);
   const current = hub.connectionInfo(deviceId);
   if (!current) throw new Error('Worker disconnected during tools/list: ' + deviceId);
-  const cachedTools = toolListCache.set(current.connectionId, tools);
-  return addApprovalTools(cachedTools);
+  return toolListCache.set(current.connectionId, tools);
+}
+
+async function listTools(sourcePayload = null) {
+  const tools = await routedToolsForDevice(registry.defaultDeviceId, sourcePayload);
+  return addApprovalTools(tools);
 }
 
 async function routeResource(payload) {
@@ -526,6 +568,50 @@ function workerToolText(result) {
     .join('\n');
 }
 
+async function dispatchRoutedWorker({
+  device,
+  toolName,
+  workerArguments,
+  sourcePayload = null,
+  requestIdPrefix = 'router',
+}) {
+  const workerPayload = {
+    jsonrpc: '2.0',
+    id: requestIdPrefix + '-' + randomUUID(),
+    method: 'tools/call',
+    params: {
+      name: toolName,
+      arguments: mapPathArguments(workerArguments || {}, device),
+    },
+  };
+  try {
+    const message = await callWorker(device.deviceId, workerPayload, sourcePayload);
+    if (message.error) {
+      return toolResult(
+        { deviceId: device.deviceId, upstreamError: message.error },
+        true,
+        { deviceOnline: Boolean(hub.connectionInfo(device.deviceId)) },
+      );
+    }
+    return classifyToolResult(
+      message.result || toolResult({ error: 'Worker returned no tool result.' }, true),
+      { deviceOnline: Boolean(hub.connectionInfo(device.deviceId)) },
+    );
+  } catch (error) {
+    return toolResult({
+      deviceId: device.deviceId,
+      error: String(error?.message || error),
+    }, true, { deviceOnline: Boolean(hub.connectionInfo(device.deviceId)) });
+  }
+}
+
+async function assertRealWorkerTool(deviceId, toolName, sourcePayload = null) {
+  const tools = await routedToolsForDevice(deviceId, sourcePayload);
+  const found = tools.find((tool) => tool.name === toolName && tool.name !== 'list_devices');
+  if (!found) throw new Error('Unknown or Router-local tool_name: ' + toolName);
+  return found;
+}
+
 async function executeTool(payload, sourcePayload = null) {
   const toolName = payload?.params?.name;
 
@@ -534,6 +620,48 @@ async function executeTool(payload, sourcePayload = null) {
       defaultDeviceId: registry.defaultDeviceId,
       devices: hub.listStatus(),
       approval: approvalRuntimeSnapshot(),
+    });
+  }
+
+  if (toolName === 'approval_status') {
+    const args = payload?.params?.arguments || {};
+    refreshApprovalPolicy();
+    return structuredToolResult(approvalIdStatusValue(args.approval_id));
+  }
+
+  if (toolName === 'call_with_approval') {
+    const args = payload?.params?.arguments || {};
+    const device = typeof args.deviceId === 'string' ? getDevice(args.deviceId) : null;
+    if (!device) {
+      const detail = args.deviceId
+        ? 'Unknown or disabled deviceId: ' + args.deviceId
+        : 'deviceId is required.';
+      return toolResult({ error: detail, devices: hub.listStatus() }, true);
+    }
+    if (typeof args.tool_name !== 'string' || !args.tool_name) {
+      return toolResult({ error: 'tool_name is required.' }, true);
+    }
+    if (args.arguments != null && (typeof args.arguments !== 'object' || Array.isArray(args.arguments))) {
+      return toolResult({ error: 'arguments must be an object.' }, true);
+    }
+    try {
+      await assertRealWorkerTool(device.deviceId, args.tool_name, sourcePayload);
+    } catch (error) {
+      return toolResult({ error: String(error?.message || error) }, true);
+    }
+    const policy = refreshApprovalPolicy();
+    if (policy.mode === 'timed') {
+      const grant = timedGrantManager.active(args.approval_id);
+      if (!grant) {
+        return structuredToolResult(approvalIdStatusValue(args.approval_id), { isError: true });
+      }
+    }
+    return dispatchRoutedWorker({
+      device,
+      toolName: args.tool_name,
+      workerArguments: args.arguments || {},
+      sourcePayload,
+      requestIdPrefix: 'grant',
     });
   }
 
@@ -576,7 +704,7 @@ async function executeTool(payload, sourcePayload = null) {
         requested_duration_seconds: null,
         grant_scope: 'full_wcm',
         grant_effect: 'all_routed_tools_all_registered_devices',
-        ...grantFields(timedGrantManager.active()),
+        ...grantFields(timedGrantManager.inspect(args.approval_id)),
         action_state: null,
         action_failed: false,
         output: String(error?.message || error),
@@ -649,7 +777,7 @@ async function executeTool(payload, sourcePayload = null) {
           ...retryable,
           action_state: 'approved_retryable',
           action_failed: false,
-          output: 'The owner action was not dispatched because the target worker is offline. The timed WCM grant is active.',
+          output: 'The owner action was not dispatched because the target worker is offline. The timed WCM grant is active. Use call_with_approval with this approval_id for later WCM calls.',
         }));
       }
 
@@ -672,7 +800,8 @@ async function executeTool(payload, sourcePayload = null) {
             ...consumed,
             action_state: 'consumed',
             action_failed: true,
-            output: String(message.error?.message || JSON.stringify(message.error)),
+          output: String(message.error?.message || JSON.stringify(message.error)) +
+            ' The timed WCM grant is active; use call_with_approval with this approval_id for later WCM calls.',
           }));
         }
         const workerResult = message.result || {};
@@ -681,7 +810,8 @@ async function executeTool(payload, sourcePayload = null) {
           ...consumed,
           action_state: 'consumed',
           action_failed: false,
-          output: workerToolText(workerResult) || 'Approved owner action completed.',
+          output: (workerToolText(workerResult) || 'Approved owner action completed.') +
+            ' Use call_with_approval with this approval_id for later WCM calls. Call a normal WCM tool directly to request another independent grant.',
         }));
       } catch (error) {
         const state = approvalFailureState(error);
@@ -693,7 +823,8 @@ async function executeTool(payload, sourcePayload = null) {
           ...transitioned,
           action_state: state,
           action_failed: false,
-          output: String(error?.message || error),
+          output: String(error?.message || error) +
+            ' The timed WCM grant is active; use call_with_approval with this approval_id for later WCM calls.',
         }));
       }
     } catch (error) {
@@ -720,7 +851,7 @@ async function executeTool(payload, sourcePayload = null) {
         requested_duration_seconds: null,
         grant_scope: 'full_wcm',
         grant_effect: 'all_routed_tools_all_registered_devices',
-        ...grantFields(timedGrantManager.active()),
+        ...grantFields(timedGrantManager.inspect(args.approval_id)),
         action_state: null,
         action_failed: false,
         output: String(error?.message || error),
@@ -734,47 +865,30 @@ async function executeTool(payload, sourcePayload = null) {
     return toolResult({ error: detail, devices: hub.listStatus() }, true);
   }
 
-  const forwarded = stripModernMeta(payload);
-  forwarded.params = { ...(forwarded.params || {}) };
-  forwarded.params.arguments = stripDeviceRoutingArguments(args);
-  forwarded.params.arguments = mapPathArguments(forwarded.params.arguments, device);
-
   const policy = refreshApprovalPolicy();
-  if (policy.mode === 'timed' && !timedGrantManager.active()) {
+  const workerArguments = mapPathArguments(stripDeviceRoutingArguments(args), device);
+  if (policy.mode === 'timed') {
     const pending = pendingActionManager.ensurePending({
       deviceId: device.deviceId,
-      toolName: forwarded.params.name,
-      workerArguments: forwarded.params.arguments,
-      summary: forwarded.params.name + ' on ' + device.deviceId,
+      toolName,
+      workerArguments,
+      summary: toolName + ' on ' + device.deviceId,
     });
     return approvalPendingResult(pending, {
       deviceId: device.deviceId,
-      toolName: forwarded.params.name,
+      toolName,
     });
   }
-
-  try {
-    const message = await callWorker(device.deviceId, forwarded, sourcePayload);
-    if (message.error) {
-      return toolResult(
-        { deviceId: device.deviceId, upstreamError: message.error },
-        true,
-        { deviceOnline: Boolean(hub.connectionInfo(device.deviceId)) },
-      );
-    }
-    return classifyToolResult(
-      message.result || toolResult({ error: 'Worker returned no tool result.' }, true),
-      { deviceOnline: Boolean(hub.connectionInfo(device.deviceId)) },
-    );
-  } catch (error) {
-    return toolResult({
-      deviceId: device.deviceId,
-      error: String(error?.message || error),
-    }, true, { deviceOnline: Boolean(hub.connectionInfo(device.deviceId)) });
-  }
+  return dispatchRoutedWorker({
+    device,
+    toolName,
+    workerArguments: stripDeviceRoutingArguments(args),
+    sourcePayload,
+    requestIdPrefix: 'direct',
+  });
 }
 function sdkInstructions() {
-  return `Every Desktop Commander tool requires an explicit deviceId. WCM approval mode is controlled locally. In timed mode, the first routed tool call without an active grant is frozen and returns approval_required=true; call request_approval with that approval_id and an optional duration_seconds (default 21600). A valid approval grants timed full WCM access for all routed tools and registered devices. In off mode, routed tools execute directly. list_devices reports the current approval state. Default device: ${registry.defaultDeviceId}.\n\n${SPECIALIZED_CAPABILITIES}\n\n${WCM_ERROR_SEMANTICS}`;
+  return `Every Desktop Commander tool requires an explicit deviceId. WCM approval mode is controlled locally. In timed mode, every normal routed worker-tool call is frozen independently and returns approval_required=true with a fresh approval_id; call request_approval with that approval_id and an optional duration_seconds (default 21600). After approval, reuse that exact timed full-WCM grant through call_with_approval. Calling a normal worker tool directly always requests another independent approval. Multiple approval IDs can remain active concurrently. In off mode, routed tools and call_with_approval execute directly. list_devices reports only aggregate approval counts; approval_status performs point lookup for an ID you already possess. Default device: ${registry.defaultDeviceId}.\n\n${SPECIALIZED_CAPABILITIES}\n\n${WCM_ERROR_SEMANTICS}`;
 }
 
 function unwrapRoutedResult(message, fallback) {

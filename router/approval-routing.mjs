@@ -36,10 +36,12 @@ function approvalOutputSchema() {
       grant_scope: { type: ['string', 'null'] },
       grant_effect: { type: ['string', 'null'] },
       grant_active: { type: 'boolean' },
+      grant_state: { type: ['string', 'null'] },
       grant_approval_id: { type: ['string', 'null'] },
       grant_granted_at: { type: ['string', 'null'] },
       grant_expires_at: { type: ['string', 'null'] },
       grant_remaining_seconds: { type: 'integer' },
+      usable: { type: 'boolean' },
       action_state: { type: ['string', 'null'] },
       action_failed: { type: 'boolean' },
       wcm_classification: { type: ['string', 'null'] },
@@ -55,6 +57,66 @@ function approvalOutputSchema() {
 
 export function approvalRouterTools() {
   return [
+    {
+      name: 'approval_status',
+      description: [
+        'Inspect one WCM approval_id that you already possess.',
+        'This is a point lookup only; it never lists or discovers other approval IDs.',
+      ].join('\n\n'),
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+      execution: { taskSupport: 'forbidden' },
+      inputSchema: {
+        type: 'object',
+        properties: {
+          approval_id: {
+            type: 'string',
+            format: 'uuid',
+            pattern: UUID_PATTERN,
+          },
+        },
+        required: ['approval_id'],
+        additionalProperties: false,
+        $schema: 'http://json-schema.org/draft-07/schema#',
+      },
+      outputSchema: approvalOutputSchema(),
+    },
+    {
+      name: 'call_with_approval',
+      description: [
+        'Call one real Desktop Commander worker tool using an already-approved WCM approval_id.',
+        'The approval_id must have an active, unexpired timed grant.',
+        'This Router-local wrapper does not modify Desktop Commander tool schemas or worker protocol.',
+        'To request another independent approval, call the normal WCM worker tool directly instead.',
+      ].join('\n\n'),
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
+      execution: { taskSupport: 'forbidden' },
+      inputSchema: {
+        type: 'object',
+        properties: {
+          approval_id: {
+            type: 'string',
+            format: 'uuid',
+            pattern: UUID_PATTERN,
+          },
+          deviceId: {
+            type: 'string',
+            minLength: 1,
+          },
+          tool_name: {
+            type: 'string',
+            minLength: 1,
+          },
+          arguments: {
+            type: 'object',
+            additionalProperties: true,
+            default: {},
+          },
+        },
+        required: ['approval_id', 'deviceId', 'tool_name'],
+        additionalProperties: false,
+        $schema: 'http://json-schema.org/draft-07/schema#',
+      },
+    },
     {
       name: 'request_approval',
       description: [

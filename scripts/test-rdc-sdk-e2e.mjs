@@ -140,7 +140,13 @@ async function connectClient(url, accessToken = null) {
 
 async function verifySurface(client, { exerciseApproval = false } = {}) {
   const tools = (await client.listTools()).tools;
-  for (const name of ['list_devices', 'request_approval', 'resolve_pending_action']) {
+  for (const name of [
+    'list_devices',
+    'approval_status',
+    'call_with_approval',
+    'request_approval',
+    'resolve_pending_action',
+  ]) {
     if (!tools.some((tool) => tool.name === name)) throw new Error(`SDK tools/list is missing ${name}.`);
   }
   const requestApproval = tools.find((tool) => tool.name === 'request_approval');
@@ -220,31 +226,88 @@ async function verifySurface(client, { exerciseApproval = false } = {}) {
   }
 
   const usage = await client.callTool({
+    name: 'call_with_approval',
+    arguments: {
+      approval_id: approvalId,
+      deviceId,
+      tool_name: 'get_usage_stats',
+      arguments: {},
+    },
+  });
+  if (usage.isError) {
+    throw new Error('call_with_approval did not use the active grant.');
+  }
+
+  const fresh = await client.callTool({
     name: 'get_usage_stats',
     arguments: { deviceId },
   });
-  if (usage.structuredContent?.approval_required === true || usage.isError) {
-    throw new Error('active grant did not bypass approval for another routed tool.');
+  if (fresh.structuredContent?.approval_required !== true) {
+    throw new Error('normal routed call did not create a fresh independent approval while another grant was active.');
+  }
+  const freshApprovalId = fresh.structuredContent?.approval_id;
+  const freshCard = await client.callTool({
+    name: 'request_approval',
+    arguments: { approval_id: freshApprovalId, duration_seconds: 60 },
+    _meta: sessionMeta,
+  });
+  const freshNonce = freshCard._meta?.approval_nonce;
+  if (!freshNonce) throw new Error('fresh independent approval did not bind a card.');
+  const freshApproved = await client.callTool({
+    name: 'resolve_pending_action',
+    arguments: {
+      approval_id: freshApprovalId,
+      approval_nonce: freshNonce,
+      decision: 'approve',
+    },
+    _meta: sessionMeta,
+  });
+  if (freshApproved.structuredContent?.grant_active !== true ||
+      freshApproved.structuredContent?.action_state !== 'consumed') {
+    throw new Error('fresh independent approval B did not become active and consume its owner action.');
   }
 
   const secondDevice = deviceInfo.devices?.find((item) => item.online && item.deviceId !== deviceId)?.deviceId;
   if (secondDevice) {
     const crossDevice = await client.callTool({
-      name: 'get_config',
-      arguments: { deviceId: secondDevice },
+      name: 'call_with_approval',
+      arguments: {
+        approval_id: approvalId,
+        deviceId: secondDevice,
+        tool_name: 'get_config',
+        arguments: {},
+      },
     });
-    if (crossDevice.structuredContent?.approval_required === true || crossDevice.isError) {
-      throw new Error('active grant did not cover another registered device.');
+    if (crossDevice.isError) {
+      throw new Error('active approval-id grant did not cover another registered device.');
     }
+  }
+
+  const approvalStatus = await client.callTool({
+    name: 'approval_status',
+    arguments: { approval_id: approvalId },
+  });
+  if (approvalStatus.structuredContent?.grant_state !== 'active' ||
+      approvalStatus.structuredContent?.usable !== true) {
+    throw new Error('approval_status did not report the approved ID as active and usable.');
+  }
+  const freshApprovalStatus = await client.callTool({
+    name: 'approval_status',
+    arguments: { approval_id: freshApprovalId },
+  });
+  if (freshApprovalStatus.structuredContent?.grant_state !== 'active' ||
+      freshApprovalStatus.structuredContent?.usable !== true) {
+    throw new Error('approval_status did not report the second approved ID as active and usable.');
   }
 
   const status = await client.callTool({ name: 'list_devices', arguments: {} });
   const statusInfo = JSON.parse(status.content?.[0]?.text || '{}');
-  if (statusInfo.approval?.grant_active !== true) {
-    throw new Error('list_devices did not report the active grant.');
+  if (!(statusInfo.approval?.grant_count >= 2)) {
+    throw new Error('list_devices did not report both active approval-id grants.');
   }
-  if (statusInfo.approval?.requested_duration_seconds !== expectedApprovalDurationSeconds) {
-    throw new Error('list_devices reported the wrong grant duration.');
+  if ('grant_approval_id' in (statusInfo.approval || {}) ||
+      'pending_approval_id' in (statusInfo.approval || {})) {
+    throw new Error('list_devices leaked raw approval IDs.');
   }
 }
 

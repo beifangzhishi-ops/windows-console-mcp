@@ -212,6 +212,7 @@ export const APPROVAL_UI_HTML = String.raw`<!doctype html>
           operation_id: structured?.operation_id,
           state: structured?.state,
           grant_active: structured?.grant_active,
+          grant_state: structured?.grant_state,
           grant_approval_id: structured?.grant_approval_id,
           grant_expires_at: structured?.grant_expires_at,
           requested_duration_seconds: structured?.requested_duration_seconds,
@@ -232,7 +233,7 @@ export const APPROVAL_UI_HTML = String.raw`<!doctype html>
         };
         const contextText = decision === "deny"
           ? "The user denied the frozen WCM action. Do not run it."
-          : "The user approved the frozen WCM owner action and timed full-access grant. WCM handled the owner action; do not recreate or rerun it.";
+          : "The user approved the frozen WCM owner action and timed full-access grant. WCM handled the owner action; do not recreate or rerun it. Use call_with_approval with this approval_id for later WCM calls under this grant. Call a normal WCM tool directly to request another independent grant.";
         try {
           await request("ui/update-model-context", {
             content: [{
@@ -247,7 +248,7 @@ export const APPROVAL_UI_HTML = String.raw`<!doctype html>
         if (!openai || typeof openai.sendFollowUpMessage !== "function") return;
         const prompt = decision === "deny"
           ? "Continue from the WCM denial result already placed in model context. Do not recreate or run the frozen action."
-          : "Continue from the WCM approval result already placed in model context. WCM handled the frozen owner action and timed grant; do not recreate or rerun the owner action.";
+          : "Continue from the WCM approval result already placed in model context. WCM handled the frozen owner action. Reuse this grant only through call_with_approval with its approval_id; call a normal WCM tool directly to request another independent grant.";
         try {
           await openai.sendFollowUpMessage({ prompt, scrollToBottom: false });
         } catch {}
@@ -270,7 +271,7 @@ export const APPROVAL_UI_HTML = String.raw`<!doctype html>
           approval = { ...approval, ...structured };
           if (structured.state === "approved_retryable") {
             setStatus((structured.output || "The owner action was not dispatched.") +
-              " The timed WCM grant remains active; retry the action normally if needed.", true);
+              " The timed WCM grant remains active; use call_with_approval with this approval_id.", true);
           } else if (structured.state === "execution_unknown") {
             setStatus((structured.output || "Execution outcome is unknown. WCM will not retry automatically.") +
               " The timed WCM grant remains active.", true);
