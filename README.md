@@ -54,6 +54,30 @@ config/worker-*.env
 logs/
 ```
 
+### Diagnostics watchdog autostart
+
+To keep the long-running WCM diagnostics watchdog active after interactive
+Windows logon **without opening a visible terminal**, install its dedicated
+scheduled task:
+
+```powershell
+& "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\Documents\ChatGPT\windows-console-mcp\scripts\install-diagnostics-watchdog.ps1"
+```
+
+The installer writes a generated WScript launcher under the ignored `.state/`
+directory, then registers the `WCM Diagnostics Watchdog` logon task if absent,
+or updates only the existing task's action (preserving its account, triggers,
+and settings). The launcher starts `scripts/diagnostics-watchdog.ps1` with the WScript hidden-window
+flag and waits for the monitor. Rerunning the installer refreshes the existing
+task configuration; after updating a running task, end **only that watchdog
+task** and start it again to apply the changed action. Never stop the
+`Desktop Commander Selfhost Gateway` task for a watchdog-only change.
+
+The watchdog remains single-instance through its named mutex; it records
+diagnostics under `logs/watchdog/`. Verify the task's action points to
+`wscript.exe` and that its log shows `watchdog started`. The gateway itself
+uses the separate installer `scripts/install-rdc-autostart.ps1`.
+
 `config/devices.json.example` shows the registry format. Local workers use a local token. Remote workers are bound to their registered Tailscale IPv4 and are accepted only on the controller's Tailscale-bound TCP listener.
 
 ## Remote workers

@@ -9,6 +9,8 @@
 
 ## Test safety on the live WCM host
 
+- Diagnostics watchdog login autostart is managed by `scripts/install-diagnostics-watchdog.ps1`: use its generated hidden WScript launcher, not a direct PowerShell Scheduled Task (which can expose a console despite `-WindowStyle Hidden`). Keep the watchdog and `Desktop Commander Selfhost Gateway` tasks independent. Reconfigure/restart only the watchdog when fixing its window; do not interrupt the gateway. Watchdog diagnostics live in `logs/watchdog/`.
+
 - Read this before running repository tests from ChatGPT/WCM.
 - `npm test` is self-contained with respect to test data/config, but do **not** launch it through the same live WCM connection that is controlling this checkout.
 - In practice, running `npm test` from the active WCM session can interrupt the worker/gateway transport and make subsequent WCM tool calls return HTTP 502 until the gateway reconnects or is restarted.
