@@ -11,7 +11,7 @@
   "scripts": {
     "postinstall": "node scripts/apply-desktop-commander-image-guard.mjs",
     "check:ui": "node scripts/test-ui-bundle.mjs",
-    "test": "npm run check:ui && node scripts/test-icon.mjs && node scripts/test-approval-policy.mjs && node scripts/test-approval.mjs && node scripts/test-router-routing-contract.mjs && node scripts/test-self-restart.mjs && node --test scripts/test-supervisor-restart.mjs && node worker/tests/native-template-smoke.mjs && node scripts/test-self-contained.mjs && node --test scripts/test-watchdog-autostart.mjs",
+    "test": "npm run check:ui && node scripts/test-icon.mjs && node scripts/test-approval-policy.mjs && node scripts/test-approval.mjs && node scripts/test-approval-receipts.mjs && node scripts/test-approval-card.mjs && node scripts/test-router-routing-contract.mjs && node scripts/test-self-restart.mjs && node --test scripts/test-supervisor-restart.mjs && node worker/tests/native-template-smoke.mjs && node scripts/test-self-contained.mjs && node --test scripts/test-watchdog-autostart.mjs",
     "test:live": "npm run check:ui && node scripts/test-rdc-sdk-e2e.mjs",
     "test:all": "npm test && npm run test:live",
     "test:sdk": "npm run check:ui && node scripts/test-rdc-sdk-e2e.mjs"

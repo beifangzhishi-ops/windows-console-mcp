@@ -237,10 +237,14 @@ assert.equal(
   'approved_retryable',
 );
 
-assert.equal(APPROVAL_UI_URI, 'ui://wcm/approval-v1.html');
+assert.equal(APPROVAL_UI_URI, 'ui://wcm/approval-v2.html');
 assert.match(APPROVAL_UI_HTML, /<div id="title">WCM approval<\/div>/u);
 assert.match(APPROVAL_UI_HTML, /full WCM|all routed WCM tools/u);
 assert.match(APPROVAL_UI_HTML, /name: "resolve_pending_action"/u);
+assert.match(APPROVAL_UI_HTML, /name: "get_approval_status"/u);
+assert.match(APPROVAL_UI_HTML, /function verifyCardState\(/u);
+assert.match(APPROVAL_UI_HTML, /function restoreWidgetSnapshot\(/u);
+assert.match(APPROVAL_UI_HTML, /"ui\/message"/u);
 assert.match(APPROVAL_UI_HTML, /Pass this approval_id directly on later routed WCM tool calls/u);
 assert.ok(audit.some((event) => event.event === 'requested'));
 assert.ok(audit.some((event) => event.event === 'app_bound'));

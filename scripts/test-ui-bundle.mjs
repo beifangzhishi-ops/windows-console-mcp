@@ -7,7 +7,7 @@ import {
 
 const html = APPROVAL_UI_HTML;
 
-assert.equal(APPROVAL_UI_URI, 'ui://wcm/approval-v1.html');
+assert.equal(APPROVAL_UI_URI, 'ui://wcm/approval-v2.html');
 assert.match(html, /<div id="title">WCM approval<\/div>/);
 assert.match(html, /<script>\s*\(\(\) => \{/);
 assert.doesNotMatch(html, /type=["']module["']/i);

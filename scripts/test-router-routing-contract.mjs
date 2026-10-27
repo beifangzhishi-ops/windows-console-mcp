@@ -38,14 +38,18 @@ assert.deepEqual(RESTART_WCM_TOOL.inputSchema.required, undefined);
 assert.deepEqual(RESTART_WCM_TOOL.inputSchema.properties, {});
 assert.equal(RESTART_WCM_TOOL.inputSchema.additionalProperties, false);
 const statusTool = approvalTools.find((tool) => tool.name === 'approval_status');
+const verifiedStatus = approvalTools.find((tool) => tool.name === 'get_approval_status');
 const requestCard = approvalTools.find((tool) => tool.name === 'request_approval');
 const resolver = approvalTools.find((tool) => tool.name === 'resolve_pending_action');
-assert.ok(statusTool && requestCard && resolver);
+assert.ok(statusTool && verifiedStatus && requestCard && resolver);
 assert.deepEqual(
   approvalTools.map((tool) => tool.name),
-  ['approval_status', 'request_approval', 'resolve_pending_action'],
+  ['approval_status', 'get_approval_status', 'request_approval', 'resolve_pending_action'],
 );
 assert.deepEqual(statusTool.inputSchema.required, ['approval_id']);
+assert.deepEqual(verifiedStatus.inputSchema.required, ['approval_id', 'approval_nonce']);
+assert.deepEqual(verifiedStatus._meta?.ui?.visibility, ['app']);
+assert.equal(verifiedStatus.annotations.readOnlyHint, true);
 assert.deepEqual(requestCard.inputSchema.required, ['approval_id']);
 assert.equal(requestCard.inputSchema.properties.duration_seconds.default, 21600);
 assert.equal(requestCard.inputSchema.properties.duration_seconds.minimum, 60);

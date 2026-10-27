@@ -31,6 +31,7 @@ export class PendingActionManager {
     terminalRetentionLimit = DEFAULT_TERMINAL_RETENTION_LIMIT,
     now = () => Date.now(),
     audit = null,
+    onTerminal = null,
   } = {}) {
     this.unboundTtlMs = Number.isFinite(Number(unboundTtlMs)) && Number(unboundTtlMs) > 0
       ? Number(unboundTtlMs)
@@ -46,6 +47,7 @@ export class PendingActionManager {
       : DEFAULT_TERMINAL_RETENTION_LIMIT;
     this.now = now;
     this.audit = audit;
+    this.onTerminal = onTerminal;
     this.requests = new Map();
   }
 
@@ -63,6 +65,18 @@ export class PendingActionManager {
       terminal_reason: request?.terminalReason || null,
       ...extra,
     });
+  }
+
+  recordTerminal(request, { actionFailed = false } = {}) {
+    try {
+      this.onTerminal?.(request, { state: request.state, actionFailed });
+    } catch (error) {
+      this.audit?.({
+        event: 'approval_receipt_save_failed',
+        approval_id: request.approvalId,
+        error: String(error?.message || error),
+      });
+    }
   }
 
   pendingDeadline(request) {
@@ -96,6 +110,7 @@ export class PendingActionManager {
           ? 'card_timeout'
           : 'unbound_timeout';
         this.emit('expired', request);
+        this.recordTerminal(request);
         continue;
       }
       const terminalAt = this.terminalAt(request);
@@ -137,6 +152,7 @@ export class PendingActionManager {
       requested_duration_seconds: request.requestedDurationSeconds ?? null,
       intent_sha256: request.intentHash,
       terminal_reason: request.terminalReason || null,
+      action_failed: request.actionFailed === true,
     };
   }
 
@@ -229,6 +245,22 @@ export class PendingActionManager {
     }
   }
 
+  readAppStatus(approvalId, approvalNonce, hostSession = null, receiptStore = null) {
+    this.prune();
+    const request = this.requests.get(String(approvalId || ''));
+    if (request) {
+      this.assertAppRequest(request, approvalNonce, hostSession);
+      return {
+        ...this.publicRequest(request),
+        action_failed: request.actionFailed === true,
+        result_unavailable: false,
+      };
+    }
+    const archived = receiptStore?.read(approvalId, approvalNonce, hostSession);
+    if (archived) return archived;
+    throw new Error('Approval card state is unavailable.');
+  }
+
   claim(approvalId, approvalNonce, hostSession = null) {
     this.prune();
     const request = this.requests.get(String(approvalId || ''));
@@ -262,26 +294,29 @@ export class PendingActionManager {
     request.state = 'denied';
     request.respondedAt = this.now();
     request.terminalReason = 'user_denied';
+    this.recordTerminal(request);
     this.emit('responded', request, { decision: 'deny' });
     return this.publicRequest(request);
   }
 
-  transition(approvalId, nextState) {
+  transition(approvalId, nextState, { actionFailed = false } = {}) {
     const request = this.requests.get(String(approvalId || ''));
     if (!request) throw new Error('Unknown or expired approval_id.');
     if (request.state !== 'dispatching') {
       throw new Error('Approval request is not dispatching; state=' + request.state + '.');
     }
     request.state = nextState;
+    request.actionFailed = actionFailed === true;
     if (nextState === 'consumed') request.consumedAt = this.now();
     if (nextState === 'approved_retryable') request.retryableAt = this.now();
     if (nextState === 'execution_unknown') request.unknownAt = this.now();
     this.emit(nextState, request);
+    this.recordTerminal(request, { actionFailed });
     return this.publicRequest(request);
   }
 
-  markConsumed(approvalId) {
-    return this.transition(approvalId, 'consumed');
+  markConsumed(approvalId, options = {}) {
+    return this.transition(approvalId, 'consumed', options);
   }
 
   markRetryable(approvalId) {
@@ -300,6 +335,7 @@ export class PendingActionManager {
       request.state = 'superseded';
       request.supersededAt = this.now();
       request.terminalReason = reason;
+      this.recordTerminal(request);
       this.emit('superseded', request, { reason });
       cleared.push(this.publicRequest(request));
     }

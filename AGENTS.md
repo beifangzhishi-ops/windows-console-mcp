@@ -22,6 +22,9 @@
 
 ## WCM error semantics
 
+- WCM approval cards use only `ui://wcm/approval-v2.html`; do not add compatibility aliases or old card URIs. An authenticated, app-only, read-only `get_approval_status` verifies original nonce, operation ID, and optional Host session. Do not substitute model-facing `approval_status` for this check.
+- After reconnect/remount, the card must fail closed until its own live pending state is verified. Persist only bounded minimal terminal receipts under `logs/approval-receipts.json`; they can explain a historical decision but never restore grant rights, pending actions, or worker execution. UI widget state is display-only, never a source of authority. Failed ChatGPT continuation must never re-run a frozen owner action.
+
 - Only a result explicitly classified as `WCM classification: command_blocked`, originating from the exact upstream marker `Error: Command not allowed`, means the WCM command blocklist rejected the command.
 - Schema/argument errors, path errors, command-not-found errors, non-zero exits, HTTP 502, worker disconnects, and runtime/process failures are not command-blocklist rejections.
 - A single network/site error such as `Network is unreachable`, DNS failure, timeout, connection reset, HTTP 403/404, or target-site verification/challenge does not mean WCM or the target device is unavailable. Check `list_devices`, retry transient network requests 2-3 times when appropriate, and only conclude WCM/device connectivity is unavailable when the device is reported offline or repeated harmless local WCM checks fail.

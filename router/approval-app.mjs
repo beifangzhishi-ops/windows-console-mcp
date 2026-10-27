@@ -1,4 +1,4 @@
-// Host-facing approval View intentionally keeps the ChatGPT bridge already verified on Android.
+// WCM approval card: authenticated status recovery, with no executable state in UI snapshots.
 export const APPROVAL_UI_HTML = String.raw`<!doctype html>
 <html lang="en">
 <head>
@@ -87,8 +87,8 @@ export const APPROVAL_UI_HTML = String.raw`<!doctype html>
     <div id="command"></div>
     <div id="status" aria-live="polite">Waiting for your decision.</div>
     <div id="actions">
-      <button id="deny" type="button">Deny</button>
-      <button id="approve" type="button">Approve</button>
+      <button id="deny" type="button" disabled>Deny</button>
+      <button id="approve" type="button" disabled>Approve</button>
     </div>
   </div>
   <script>
@@ -99,6 +99,12 @@ export const APPROVAL_UI_HTML = String.raw`<!doctype html>
       let approval = null;
       let approvalNonce = null;
       let busy = false;
+      let verified = false;
+      let bridgeInitialized = false;
+      let finalOutcome = null;
+      let hostCapabilities = {};
+      let queryGeneration = 0;
+      let continuationStarted = false;
 
       const title = document.getElementById("title");
       const justification = document.getElementById("justification");
@@ -156,8 +162,9 @@ export const APPROVAL_UI_HTML = String.raw`<!doctype html>
           window.openai?.toolOutput || null;
         const hidden = envelope?._meta || {};
         if (!structured) return false;
+        if (approval && structured.approval_id !== approval.approval_id) return false;
         approval = structured;
-        approvalNonce = hidden.approval_nonce || null;
+        approvalNonce = hidden.approval_nonce || approvalNonce || null;
         title.textContent = "WCM requests timed full access";
         justification.textContent = structured.action_summary ||
           "Approve this frozen owner action and temporarily allow WCM operations?";
@@ -182,9 +189,11 @@ export const APPROVAL_UI_HTML = String.raw`<!doctype html>
           } else {
             setStatus("Approval token is unavailable in this host.", true);
           }
-          approve.disabled = true;
-          deny.disabled = true;
         }
+        approve.disabled = true;
+        deny.disabled = true;
+        if (approvalNonce) restoreWidgetSnapshot();
+        if (bridgeInitialized) void verifyCardState();
         updateHeight();
         return true;
       }
@@ -201,8 +210,113 @@ export const APPROVAL_UI_HTML = String.raw`<!doctype html>
 
       function setBusy(value) {
         busy = value;
-        approve.disabled = value || !approvalNonce;
-        deny.disabled = value || !approvalNonce;
+        approve.disabled = value || !verified || Boolean(finalOutcome) || !approvalNonce;
+        deny.disabled = value || !verified || Boolean(finalOutcome) || !approvalNonce;
+      }
+
+      const terminalStates = new Set([
+        "consumed", "denied", "expired", "superseded",
+        "execution_unknown", "approved_retryable"
+      ]);
+
+      function isTerminal(value) {
+        return Boolean(value && terminalStates.has(value.state));
+      }
+
+      function terminalMessage(value, unverified = false) {
+        let message;
+        if (value.state === "denied") message = "Denied. The frozen action was not dispatched.";
+        else if (value.state === "expired") message = "This approval expired. The frozen action was not dispatched.";
+        else if (value.state === "superseded") message = "This approval was invalidated by a policy change.";
+        else if (value.state === "execution_unknown") message = "Approved. Owner action outcome is unknown; it will not be automatically retried.";
+        else if (value.state === "approved_retryable") message = "Approved. Owner action was not dispatched; the grant is not a new approval request.";
+        else if (value.action_failed) message = "Approved, but the owner action failed.";
+        else message = "Approved. The owner action was handled.";
+        if (value.result_unavailable) message += " Archived decision; owner action output is unavailable.";
+        if (value.grant_active) message += " Timed WCM access is currently active.";
+        if (unverified) message += " Saved card state; server verification unavailable.";
+        return message;
+      }
+
+      function renderTerminal(value, { unverified = false } = {}) {
+        finalOutcome = value;
+        verified = false;
+        busy = false;
+        approve.disabled = true;
+        deny.disabled = true;
+        setStatus(terminalMessage(value, unverified), Boolean(value.action_failed) || unverified);
+      }
+
+      function saveWidgetSnapshot(value) {
+        if (typeof window.openai?.setWidgetState !== "function" || !isTerminal(value)) return;
+        const snapshot = {
+          version: 1,
+          approval_id: approval.approval_id,
+          operation_id: approval.operation_id,
+          state: value.state,
+          action_failed: value.action_failed === true
+        };
+        try {
+          Promise.resolve(window.openai.setWidgetState(snapshot)).catch(() => {});
+        } catch {}
+      }
+
+      function restoreWidgetSnapshot() {
+        const saved = window.openai?.widgetState;
+        if (saved?.version === 1 &&
+            saved.approval_id === approval?.approval_id &&
+            saved.operation_id === approval?.operation_id &&
+            isTerminal(saved)) {
+          renderTerminal(saved, { unverified: true });
+        }
+      }
+
+      async function verifyCardState() {
+        if (!bridgeInitialized || !approval?.approval_id) return;
+        if (!approvalNonce) {
+          verified = false;
+          setBusy(false);
+          setStatus("Approval capability unavailable. This card cannot approve.", true);
+          return;
+        }
+        const generation = ++queryGeneration;
+        verified = false;
+        setBusy(false);
+        try {
+          const response = await request("tools/call", {
+            name: "get_approval_status",
+            arguments: {
+              approval_id: approval.approval_id,
+              approval_nonce: approvalNonce
+            }
+          }, 12000);
+          if (generation !== queryGeneration) return;
+          const value = response?.structuredContent;
+          if (response?.isError || !value ||
+              value.approval_id !== approval.approval_id ||
+              value.operation_id !== approval.operation_id ||
+              value.kind !== "approval" ||
+              (value.device_id && value.device_id !== approval.device_id) ||
+              (value.tool_name && value.tool_name !== approval.tool_name)) {
+            throw new Error("Approval identity or status verification failed");
+          }
+          if (isTerminal(value)) {
+            renderTerminal(value);
+            if (!value.result_unavailable) saveWidgetSnapshot(value);
+          } else if (value.state === "pending") {
+            finalOutcome = null;
+            verified = true;
+            busy = false;
+            setBusy(false);
+            setStatus("Waiting for your decision.");
+          } else {
+            setStatus("Approval is being processed. Reopen this card to check its result.");
+          }
+        } catch {
+          if (generation !== queryGeneration) return;
+          if (isTerminal(finalOutcome)) renderTerminal(finalOutcome, { unverified: true });
+          else setStatus("Approval status cannot be verified. This card cannot approve again.", true);
+        }
       }
 
       function resultSummary(structured) {
@@ -227,6 +341,8 @@ export const APPROVAL_UI_HTML = String.raw`<!doctype html>
       }
 
       async function notifyModel(decision, structured) {
+        if (continuationStarted) return;
+        continuationStarted = true;
         const summary = {
           ...resultSummary(structured),
           decision
@@ -242,20 +358,38 @@ export const APPROVAL_UI_HTML = String.raw`<!doctype html>
             }],
             structuredContent: summary
           }, 10000);
-        } catch {}
+        } catch {
+          setStatus(terminalMessage(structured) +
+            " ChatGPT context handoff failed. Send a message to continue.", true);
+          return;
+        }
 
-        const openai = window.openai;
-        if (!openai || typeof openai.sendFollowUpMessage !== "function") return;
         const prompt = decision === "deny"
           ? "Continue from the WCM denial result already placed in model context. Do not recreate or run the frozen action."
           : "Continue from the WCM approval result already placed in model context. WCM handled the frozen owner action. Reuse this grant by passing its approval_id directly on later routed WCM tool calls; omit approval_id to request another independent grant.";
-        try {
-          await openai.sendFollowUpMessage({ prompt, scrollToBottom: false });
-        } catch {}
+        if (hostCapabilities?.message?.text) {
+          try {
+            const response = await request("ui/message", {
+              role: "user",
+              content: [{ type: "text", text: prompt }]
+            }, 10000);
+            if (response?.isError !== true) return;
+          } catch {}
+        }
+        if (typeof window.openai?.sendFollowUpMessage === "function") {
+          try {
+            await window.openai.sendFollowUpMessage({ prompt, scrollToBottom: false });
+            return;
+          } catch {}
+        }
+        setStatus(terminalMessage(structured) +
+          " ChatGPT did not continue automatically. Send a message to continue.", true);
       }
 
       async function resolve(decision) {
-        if (busy || !approval || !approvalNonce) return;
+        if (busy || !verified || finalOutcome || !approval || !approvalNonce) return;
+        verified = false;
+        queryGeneration++;
         setBusy(true);
         setStatus(decision === "deny" ? "Denying request..." : "Applying approval...");
         try {
@@ -268,6 +402,12 @@ export const APPROVAL_UI_HTML = String.raw`<!doctype html>
             }
           }, 120000);
           const structured = result?.structuredContent || {};
+          if (result?.isError === true ||
+              structured.approval_id !== approval.approval_id ||
+              structured.operation_id !== approval.operation_id ||
+              !isTerminal(structured)) {
+            throw new Error("Approval response requires verification");
+          }
           approval = { ...approval, ...structured };
           if (structured.state === "approved_retryable") {
             setStatus((structured.output || "The owner action was not dispatched.") +
@@ -287,16 +427,20 @@ export const APPROVAL_UI_HTML = String.raw`<!doctype html>
           } else {
             setStatus(structured.output || "Approved. Timed WCM access is active.");
           }
-          approve.disabled = true;
-          deny.disabled = true;
+          renderTerminal(structured);
+          saveWidgetSnapshot(structured);
           void notifyModel(decision, structured);
         } catch (error) {
           setStatus(
-            "Approval action failed: " +
+            "Approval outcome needs verification: " +
               String(error && error.message ? error.message : error),
             true
           );
-          setBusy(false);
+          busy = false;
+          verified = false;
+          approve.disabled = true;
+          deny.disabled = true;
+          void verifyCardState();
         }
       }
 
@@ -330,18 +474,24 @@ export const APPROVAL_UI_HTML = String.raw`<!doctype html>
 
       async function initialize() {
         try {
-          await request("ui/initialize", {
+          const initialized = await request("ui/initialize", {
             protocolVersion: PROTOCOL_VERSION,
             appInfo: {
               name: "wcm-approval",
               title: "WCM approval",
-              version: "1.0.0"
+              version: "2.0.0"
             },
             appCapabilities: {}
           }, 5000);
+          hostCapabilities = initialized?.hostCapabilities || {};
+          const alreadyLoaded = Boolean(approval?.approval_id);
+          bridgeInitialized = true;
           post({ jsonrpc: "2.0", method: "ui/notifications/initialized" });
           if (!readInitialResult()) {
             setStatus("Waiting for approval details.");
+            if (alreadyLoaded) void verifyCardState();
+          } else if (alreadyLoaded && !approvalNonce) {
+            void verifyCardState();
           }
         } catch (error) {
           setStatus(
@@ -358,4 +508,4 @@ export const APPROVAL_UI_HTML = String.raw`<!doctype html>
 </body>
 </html>`;
 
-export const APPROVAL_UI_URI = 'ui://wcm/approval-v1.html';
+export const APPROVAL_UI_URI = 'ui://wcm/approval-v2.html';

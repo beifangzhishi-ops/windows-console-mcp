@@ -34,6 +34,7 @@ import {
 } from './approval-policy.mjs';
 import { approvalFailureState } from './approval-execution-state.mjs';
 import { PendingActionManager } from './pending-action-manager.mjs';
+import { ApprovalReceiptStore } from './approval-receipt-store.mjs';
 import { TimedGrantManager } from './timed-grant-manager.mjs';
 import {
   APPROVAL_UI_URI,
@@ -86,8 +87,12 @@ const approvalPolicyStore = new ApprovalPolicyStore({
   root: process.cwd(),
   logger: routerLogger,
 });
+const approvalReceiptStore = new ApprovalReceiptStore({
+  stateFile: path.resolve(process.cwd(), 'logs', 'approval-receipts.json'),
+});
 const pendingActionManager = new PendingActionManager({
   audit: approvalAudit,
+  onTerminal: (request, result) => approvalReceiptStore.save(request, result),
 });
 const timedGrantManager = new TimedGrantManager({
   audit: approvalAudit,
@@ -447,7 +452,7 @@ function retainedApprovalResult(approvalId, error, {
     grant_effect: 'all_routed_tools_all_registered_devices',
     ...grantFields(grant),
     action_state: state === 'pending' ? null : state,
-    action_failed: false,
+    action_failed: known.action_failed === true,
     output,
   }), {
     isError: state === 'pending',
@@ -494,7 +499,7 @@ function approvalIdStatusValue(approvalId) {
     grant_effect: 'all_routed_tools_all_registered_devices',
     ...grantFields(grant),
     action_state: request?.state && request.state !== 'pending' ? request.state : null,
-    action_failed: false,
+    action_failed: request?.action_failed === true,
     output,
   });
 }
@@ -645,6 +650,35 @@ async function executeTool(payload, sourcePayload = null) {
     return structuredToolResult(approvalIdStatusValue(args.approval_id));
   }
 
+  if (toolName === 'get_approval_status') {
+    const args = payload?.params?.arguments || {};
+    try {
+      refreshApprovalPolicy();
+      const known = pendingActionManager.readAppStatus(
+        args.approval_id,
+        args.approval_nonce,
+        hostSessionFor(payload, sourcePayload),
+        approvalReceiptStore,
+      );
+      const grant = timedGrantManager.inspect(args.approval_id);
+      return structuredToolResult(approvalStatus({
+        classification: 'approval_card_state',
+        ...known,
+        ...grantFields(grant),
+        action_state: known.state === 'pending' ? null : known.state,
+        output: known.result_unavailable
+          ? 'Archived decision only. Active access and owner action output cannot be restored.'
+          : 'Current approval state verified.',
+      }));
+    } catch (error) {
+      return structuredToolResult(approvalStatus({
+        classification: 'approval_card_unavailable',
+        approval_id: args.approval_id || null,
+        output: String(error?.message || error),
+      }), { isError: true });
+    }
+  }
+
   if (toolName === 'request_approval') {
     const args = payload?.params?.arguments || {};
     try {
@@ -773,15 +807,17 @@ async function executeTool(payload, sourcePayload = null) {
 
       try {
         const message = await callWorker(device.deviceId, workerPayload, sourcePayload);
-        const consumed = pendingActionManager.markConsumed(args.approval_id);
+        const consumed = pendingActionManager.markConsumed(args.approval_id, {
+          actionFailed: Boolean(message.error || message.result?.isError),
+        });
         if (message.error) {
           return structuredToolResult(approvalStatus({
             ...base,
             ...consumed,
             action_state: 'consumed',
             action_failed: true,
-          output: String(message.error?.message || JSON.stringify(message.error)) +
-            ' The timed WCM grant is active; pass this approval_id directly on later routed WCM tool calls.',
+            output: String(message.error?.message || JSON.stringify(message.error)) +
+              ' The timed WCM grant is active; pass this approval_id directly on later routed WCM tool calls.',
           }));
         }
         const workerResult = message.result || {};
@@ -789,7 +825,7 @@ async function executeTool(payload, sourcePayload = null) {
           ...base,
           ...consumed,
           action_state: 'consumed',
-          action_failed: false,
+          action_failed: workerResult.isError === true,
           output: (workerToolText(workerResult) || 'Approved owner action completed.') +
             ' Pass this approval_id directly on later routed WCM tool calls. Omit approval_id on a normal WCM tool call to request another independent grant.',
         }));
