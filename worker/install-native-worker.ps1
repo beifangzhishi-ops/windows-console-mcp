@@ -7,6 +7,7 @@ param(
     [string]$TaskName='',
     [int]$ConnectTimeoutSeconds=20
 )
+#Requires -RunAsAdministrator
 $ErrorActionPreference='Stop'
 if($DeviceId -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'){ throw 'Invalid DeviceId.' }
 if(-not $ControllerHost.Trim()){ throw 'ControllerHost is required.' }
@@ -89,7 +90,7 @@ if(-not $taskUser){ throw 'Unable to determine the current Windows account for S
 $trigger=New-ScheduledTaskTrigger -AtLogOn -User $taskUser
 $trigger.Delay='PT1M'
 $settings=New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -RestartCount 10 -RestartInterval (New-TimeSpan -Minutes 1) -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-$principal=New-ScheduledTaskPrincipal -UserId $taskUser -LogonType Interactive -RunLevel Limited
+$principal=New-ScheduledTaskPrincipal -UserId $taskUser -LogonType Interactive -RunLevel Highest
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
 $stdoutLog=Join-Path $repoRoot ("logs\native-worker-{0}-stdout.log" -f $safeId)
 $stderrLog=Join-Path $repoRoot ("logs\native-worker-{0}-stderr.log" -f $safeId)

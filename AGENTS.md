@@ -9,6 +9,10 @@
 
 ## Test safety on the live WCM host
 
+- The WCM Controller gateway and native remote Worker Scheduled Tasks run under an administrator account with `RunLevel Highest`, using an interactive logon trigger. They inherit elevated rights to supervised child processes. The independent diagnostics watchdog remains `RunLevel Limited`.
+- Privilege changes to existing tasks require an elevated Windows administrator shell. Before updating an existing task, preserve its original task principal/action/triggers/settings, validate that the account belongs to Administrators, and verify effective task `RunLevel` and the new process token after a scoped restart. Never restart unrelated tasks or kill unrelated processes.
+- The repository scripts and ignored `.state/` launchers become elevated executable inputs; protect their write access from untrusted accounts. WCM timed approval still controls routed calls, but it is not a Windows privilege boundary once the worker has an elevated token.
+
 - Diagnostics watchdog login autostart is managed by `scripts/install-diagnostics-watchdog.ps1`: use its generated hidden WScript launcher, not a direct PowerShell Scheduled Task (which can expose a console despite `-WindowStyle Hidden`). Keep the watchdog and `Desktop Commander Selfhost Gateway` tasks independent. Reconfigure/restart only the watchdog when fixing its window; do not interrupt the gateway. Watchdog diagnostics live in `logs/watchdog/`.
 
 - Read this before running repository tests from ChatGPT/WCM.

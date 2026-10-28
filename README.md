@@ -37,6 +37,8 @@ The Tailscale Funnel is configured with **exact path mappings**, so apply the up
 
 ## Controller setup
 
+The Controller Supervisor Scheduled Task runs with **highest available Windows privileges** under the installing administrator account (`RunLevel Highest`, interactive logon). Its Router, local Worker, and OAuth sidecar child processes inherit that token. Install or update this task from an elevated Administrator PowerShell terminal, with an account belonging to the local Administrators group. This does not change WCM's independent timed approval mechanism. The scripts and generated `.state/` launchers must not be writable by untrusted accounts.
+
 ```powershell
 npm install
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\rdc-enable-oauth.ps1 `
@@ -55,6 +57,8 @@ logs/
 ```
 
 ### Diagnostics watchdog autostart
+
+The independent diagnostics watchdog intentionally remains at `RunLevel Limited`; elevating the WCM Controller does not elevate this diagnostic task.
 
 To keep the long-running WCM diagnostics watchdog active after interactive
 Windows logon **without opening a visible terminal**, install its dedicated
@@ -81,6 +85,8 @@ uses the separate installer `scripts/install-rdc-autostart.ps1`.
 `config/devices.json.example` shows the registry format. Local workers use a local token. Remote workers are bound to their registered Tailscale IPv4 and are accepted only on the controller's Tailscale-bound TCP listener.
 
 ## Remote workers
+
+Native remote Worker Scheduled Tasks also use `RunLevel Highest` under the installing administrator account. Install or update them from elevated Administrator PowerShell. The remote Worker Supervisor and Desktop Commander child inherit the elevated token on their own host (elevating the Controller alone does not grant remote Windows administrator rights). Existing task definitions are not changed until reconfigured, and an already-running process must be restarted to acquire the new token. Preserve the task's existing action, user, trigger, and settings during a privilege-only change.
 
 Remote workers do not run OAuth or Funnel. They connect directly to the Controller's Tailscale-bound worker hub.
 
