@@ -14,9 +14,12 @@ rc = sh.Run("powershell.exe -NoProfile -ExecutionPolicy Bypass -File ""$escaped"
 WScript.Quit rc
 "@ | Set-Content -LiteralPath $vbs -Encoding ASCII
 $action=New-ScheduledTaskAction -Execute "$env:WINDIR\System32\wscript.exe" -Argument "`"$vbs`""
-$trigger=New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+$taskUser=[string](& whoami.exe 2>$null)
+$taskUser=$taskUser.Trim()
+if($taskUser -notmatch '^[^\\]+\\[^\\]+$'){ throw 'Unable to resolve the fully qualified Windows account for the gateway task.' }
+$trigger=New-ScheduledTaskTrigger -AtLogOn -User $taskUser
 $trigger.Delay='PT1M'
 $settings=New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -RestartCount 10 -RestartInterval (New-TimeSpan -Minutes 1) -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-$principal=New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest
+$principal=New-ScheduledTaskPrincipal -UserId $taskUser -LogonType Interactive -RunLevel Highest
 Register-ScheduledTask -TaskName 'Desktop Commander Selfhost Gateway' -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
 Write-Output 'Installed scheduled task: Desktop Commander Selfhost Gateway'
