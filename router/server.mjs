@@ -22,6 +22,7 @@ import {
 import { guardRouterToolResult, resolveMaxRouterToolResultBytes } from './response-guard.mjs';
 import { ConnectionScopedToolListCache } from './tool-list-cache.mjs';
 import { RESTART_WCM_TOOL, requestWcmRestart } from './self-restart.mjs';
+import { UU_CLI_TOOL, UuCliRunner } from './uu-cli.mjs';
 import { routerClientInfo, serverInfo } from './server-info.mjs';
 import {
   stripDeviceRoutingArguments,
@@ -97,6 +98,7 @@ const pendingActionManager = new PendingActionManager({
 const timedGrantManager = new TimedGrantManager({
   audit: approvalAudit,
 });
+const uuCliRunner = new UuCliRunner();
 let approvalPolicy = approvalPolicyStore.current();
 
 function refreshApprovalPolicy() {
@@ -113,6 +115,7 @@ function refreshApprovalPolicy() {
     });
     timedGrantManager.clearAll('policy_changed');
     pendingActionManager.clearPendingAll('policy_changed');
+    uuCliRunner.closeAll('policy_changed');
   }
   approvalPolicy = refreshed.policy;
   return approvalPolicy;
@@ -311,6 +314,7 @@ function addApprovalTools(tools) {
     tools[0],
     ...approvalRouterTools(),
     RESTART_WCM_TOOL,
+    UU_CLI_TOOL,
     ...tools.slice(1),
   ];
 }
@@ -783,8 +787,9 @@ async function executeTool(payload, sourcePayload = null) {
         ...grantFields(grant),
       };
 
+      const isUuCli = claimed.action.toolName === 'uuyc_cli';
       const device = getDevice(claimed.action.deviceId);
-      if (!device || !hub.connectionInfo(device.deviceId)) {
+      if (!isUuCli && (!device || !hub.connectionInfo(device.deviceId))) {
         const retryable = pendingActionManager.markRetryable(args.approval_id);
         return structuredToolResult(approvalStatus({
           ...base,
@@ -806,7 +811,21 @@ async function executeTool(payload, sourcePayload = null) {
       };
 
       try {
-        const message = await callWorker(device.deviceId, workerPayload, sourcePayload);
+        let message;
+        if (isUuCli) {
+          try {
+            message = { result: structuredToolResult(await uuCliRunner.execute(
+              claimed.action.workerArguments,
+              { approvalId: args.approval_id, expiresAt: grant.expires_at },
+            )) };
+          } catch (error) {
+            message = { result: structuredToolResult(
+              { error: String(error?.message || error) }, { isError: true },
+            ) };
+          }
+        } else {
+          message = await callWorker(device.deviceId, workerPayload, sourcePayload);
+        }
         const consumed = pendingActionManager.markConsumed(args.approval_id, {
           actionFailed: Boolean(message.error || message.result?.isError),
         });
@@ -872,6 +891,39 @@ async function executeTool(payload, sourcePayload = null) {
         action_failed: false,
         output: String(error?.message || error),
       }), { isError: true });
+    }
+  }
+
+  if (toolName === 'uuyc_cli') {
+    const args = payload?.params?.arguments || {};
+    const { approval_id, ...uuArguments } = args;
+    const policy = refreshApprovalPolicy();
+    if (policy.mode === 'timed') {
+      if (approval_id) {
+        const grant = timedGrantManager.active(approval_id);
+        if (!grant) return structuredToolResult(approvalIdStatusValue(approval_id), { isError: true });
+        try {
+          return structuredToolResult(await uuCliRunner.execute(uuArguments, {
+            approvalId: approval_id, expiresAt: grant.expires_at,
+          }));
+        } catch (error) {
+          return structuredToolResult({ error: String(error?.message || error) }, { isError: true });
+        }
+      }
+      const pending = pendingActionManager.ensurePending({
+        deviceId: registry.defaultDeviceId,
+        toolName: 'uuyc_cli',
+        workerArguments: uuArguments,
+        summary: 'uuyc_cli on WCM Controller',
+      });
+      return approvalPendingResult(pending, {
+        deviceId: registry.defaultDeviceId, toolName: 'uuyc_cli',
+      });
+    }
+    try {
+      return structuredToolResult(await uuCliRunner.execute(uuArguments));
+    } catch (error) {
+      return structuredToolResult({ error: String(error?.message || error) }, { isError: true });
     }
   }
 

@@ -11,12 +11,13 @@
   "scripts": {
     "postinstall": "node scripts/apply-desktop-commander-image-guard.mjs",
     "check:ui": "node scripts/test-ui-bundle.mjs",
-    "test": "npm run check:ui && node scripts/test-icon.mjs && node scripts/test-approval-policy.mjs && node scripts/test-approval.mjs && node scripts/test-approval-receipts.mjs && node scripts/test-approval-card.mjs && node scripts/test-router-routing-contract.mjs && node scripts/test-self-restart.mjs && node --test scripts/test-supervisor-restart.mjs && node worker/tests/native-template-smoke.mjs && node scripts/test-self-contained.mjs && node --test scripts/test-watchdog-autostart.mjs",
+    "test": "node --test scripts/test-uu-cli.mjs && npm run check:ui && node scripts/test-icon.mjs && node scripts/test-approval-policy.mjs && node scripts/test-approval.mjs && node scripts/test-approval-receipts.mjs && node scripts/test-approval-card.mjs && node scripts/test-router-routing-contract.mjs && node scripts/test-self-restart.mjs && node --test scripts/test-supervisor-restart.mjs && node worker/tests/native-template-smoke.mjs && node scripts/test-self-contained.mjs && node --test scripts/test-watchdog-autostart.mjs",
     "test:live": "npm run check:ui && node scripts/test-rdc-sdk-e2e.mjs",
     "test:all": "npm test && npm run test:live",
     "test:sdk": "npm run check:ui && node scripts/test-rdc-sdk-e2e.mjs"
   },
   "dependencies": {
+    "@lydell/node-pty": "1.1.0",
     "@modelcontextprotocol/sdk": "^1.30.1",
     "@wonderwhy-er/desktop-commander": "0.2.48"
   }

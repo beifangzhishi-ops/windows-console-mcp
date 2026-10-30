@@ -25,6 +25,18 @@ Controller
 
 The public `/rdc/mcp` endpoint uses the MCP SDK `StreamableHTTPServerTransport`, matching CCM's standard initialize/session lifecycle.
 
+## UU Remote CLI (no additional agent on temporary PCs)
+
+The Controller exposes one Router-local `uuyc_cli` tool which forwards native arguments to the installed `C:\Program Files\Netease\GameViewer\bin\uuyc-cli.exe`. Its Windows ConPTY adapter runs on the Controller only (prebuilt `@lydell/node-pty` dependency). The remote Windows PC needs only the UU Remote client, a logged-in account, and UU's remote-terminal capability; it does **not** need SSH, Tailscale, Python, or a WCM Worker.
+
+- Discover UU devices with `{ "args": ["device", "ls", "--json"], "approval_id": "<active WCM grant>" }`.
+- Open an interactive remote terminal with `{ "args": ["term", "-d", "<UU device ID>", "new", "session-name"], "approval_id": "<active WCM grant>" }`. A running process returns a `session_id`; use the **same tool** with `session_id`, `stdin` (for example `"hostname\r"`), and the **same** `approval_id` to continue. `close: true` terminates that local CLI session.
+- `timeout_ms` is a per-call wait of up to 20 seconds, not the lifetime of the remote command. Output is raw terminal text and may contain ANSI control codes; an exit returns `exit_code`. A session is bounded to 10 minutes, 8 concurrent sessions, and the original grant's expiration.
+- **Exactly the standard WCM timed full-access approval applies.** Omitting `approval_id` in timed mode creates the regular WCM approval card; after approval the same grant covers UU CLI and all WCM worker tools. No second approval service, grant or database is introduced. Expiration, policy change, or session closing terminates the Controller-side PTY. UU remote Windows permissions remain those of the UU remote terminal, not an automatic elevation.
+- The Controller needs a live UU GUI/IPC session under the same Windows login context as its Router. A simultaneous UU GUI remote-control session can make `term` return error 127. If needed, set `WC_UU_CLI_PATH` to the full path of the Controller's official UU CLI executable. No passwords, SSH keys or UU credentials are passed through WCM.
+
+The Router tool can reach any UU device authorized under the Controller's UU account; this intentionally broadens the reach of the existing `full_wcm` grant. Restrict who can approve WCM access and use the UU account accordingly. This is a native CLI wrapper, not a reimplementation of UU's protocol.
+
 ## MCP identity icon
 
 WCM has a dedicated, public PNG endpoint at `/rdc/icon.png` on the same HTTPS origin as the protected `/rdc/mcp` endpoint. The sidecar serves only the fixed repository asset `assets/wcm-icon.png` (GET and HEAD, no OAuth needed); it does **not** expose a general file server. The MCP `initialize.serverInfo` includes the icon's absolute HTTPS URL and its actual dimensions only when the PNG exists and passes basic file checks. With no image installed, icon metadata is omitted rather than advertising a broken link. The server display title is `Windows Console MCP`.

@@ -42,6 +42,13 @@
 - Native Windows workers must not retain Docker path mappings such as `C:\ -> /host`. Controller `config/devices.json` is loaded at Router startup, so a mapping change takes effect only after a controlled Router restart.
 - Do not restart the Controller Router from the WCM path it is currently carrying unless an independent recovery/control path is available.
 
+## UU CLI Router integration
+
+- `uuyc_cli` is a **single Router-local WCM tool** exposing original UU CLI argument tokens and optional persistent ConPTY stdin/session_id. Never split it into separate device/terminal/exec tools and do not modify upstream Desktop Commander or its worker protocol for UU support.
+- All calls, including session polling, stdin, and close, reuse **the existing WCM full-access timed grant** via `approval_id`. Missing grant must generate a normal WCM approval card. No independent UU approval, UI, policy, or grant store. Sessions are associated with their exact initial grant and must expire/terminate with it or on WCM policy changes. An approval owner action must execute at most once; command failures should be consumed, not automatically replayed.
+- The PTY adapter runs **only on the Controller's Windows machine**. A temporary remote computer needs only UU Remote, never a WCM Worker, Python, SSH or Tailscale. Do not move the bridge or install its dependencies on UU target devices. Router login context needs live UU GUI IPC. Never interpret UU error 127 (remote desktop in use) as a WCM policy refusal.
+- `@lydell/node-pty` contains Windows ConPTY prebuilds. Preserve its platform optional dependencies when installing/updating WCM. `scripts/test-uu-cli.mjs` validates argument passthrough, session ownership and expiry.
+
 ## Upstream Desktop Commander boundary
 
 - Treat the bundled Desktop Commander tool implementations, worker-facing tool schemas, and worker protocol as upstream code. WCM-specific features must not patch or fork those upstream tool implementations merely to add WCM behavior.
