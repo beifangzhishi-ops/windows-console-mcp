@@ -110,10 +110,25 @@ See [`worker/README.md`](worker/README.md) for native install/status/uninstall a
 
 The router adds `list_devices` and augments every ChatGPT-facing Desktop Commander worker tool with two WCM-only routing fields: required `deviceId` and optional `approval_id`. Example targets are `local-pc` and `remote-worker`. After resolving approval and device routing, the router removes both WCM-only fields, applies configured path mappings, and forwards only the original Desktop Commander business arguments to the worker. Desktop Commander's original tool implementations, worker-facing schemas, and worker protocol are not modified.
 
-WCM has two local approval modes:
+WCM has three local approval modes:
 
 - `timed` (default): a routed worker-tool call **without** `approval_id` is frozen independently and returns `approval_required=true` with a fresh opaque `approval_id`. An unbound frozen action is valid for 15 minutes. Calling `request_approval` binds that ID to an approval card and starts a separate 3-day (72-hour) card-validity window. Its optional `duration_seconds` controls only that ID's post-approval full-WCM grant; omitting it requests 21600 seconds (6 hours). Approve starts the grant at approval time and dispatches only that ID's frozen owner action once. While the grant is active, pass that exact `approval_id` directly on later routed worker-tool calls to authorize them. Deny dispatches nothing. Different IDs never block, replace, or supersede one another, so multiple approved IDs may remain active concurrently with independent expiry times.
+- `totp`: WCM worker tools and `uuyc_cli` require an active `approval_id`; missing authorization does **not** create an approval card. Exchange a six-digit code explicitly supplied by the user via `wcm_unlock` for a new full-WCM timed grant (default 6 hours; optionally 60–604800 seconds). Codes are single-use with a 30-second period, small clock-skew tolerance and a lightweight failed-attempt lockout. **Prefer CCM unless the user expressly asks to use WCM**, even when a valid WCM grant is known.
 - `off`: routed tools execute directly without approval cards.
+
+### Bind a phone authenticator on the 6v Controller
+
+Any standard SHA-1 TOTP authenticator (2FAS, Microsoft Authenticator, Google Authenticator, etc.) supports this: six digits changing every 30 seconds. Use your own 6v local/UU terminal under the Windows account that runs the WCM Supervisor. The first command displays a Base32 secret **only in that terminal**; do not run it through model-operated tools:
+
+`powershell.exe -NoProfile -File 'C:\Users\Songjx\Documents\ChatGPT\windows-console-mcp\scripts\manage-wcm-totp.ps1' -Action Init`
+
+Manually add the displayed key to the phone as WCM (6v). Next, confirm a code and activate TOTP mode:
+
+`powershell.exe -NoProfile -File 'C:\Users\Songjx\Documents\ChatGPT\windows-console-mcp\scripts\manage-wcm-totp.ps1' -Action Confirm -Code '123456'`
+
+Replace `123456` with the live code. Until successful confirmation, WCM stays in its existing `timed` card mode. Use `-Action Status` without showing the secret. Only on deliberate re-pairing, use `-Action Reset`, which destroys the seed, revokes grants and requires fresh Init/Confirm. A permanent 20-byte seed is DPAPI CurrentUser-encrypted at `%LOCALAPPDATA%\WCM\secrets\totp.dpapi` (outside Git); replay state is stored alongside it. Reinstalling Windows or changing the Supervisor account may require re-pairing. Back up the seed privately if desired.
+
+After deploying the Router, **Refresh tools** in the ChatGPT WCM plugin to expose `wcm_unlock`. This is a light accidental-use gate, not a hard isolation boundary against administrative host access.
 
 `duration_seconds` is accepted only by `request_approval`, not by routed worker tools or the app-only resolver. Valid values are whole seconds from 60 through 604800 (7 days); common values are 60 (1 minute), 300 (5 minutes), 1800 (30 minutes), 3600 (1 hour), 21600 (6 hours, default), 86400 (1 day), and 604800 (7 days). It is independent of card validity: a 60-second grant request still has the normal 3-day card window, and the grant clock starts only when the user approves. Once a card is bound, its requested duration cannot be changed and its hidden nonce is never reissued. Active grants are not extendable; request a new independent approval ID for a longer grant.
 

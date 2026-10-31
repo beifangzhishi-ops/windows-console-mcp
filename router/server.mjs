@@ -37,6 +37,7 @@ import { approvalFailureState } from './approval-execution-state.mjs';
 import { PendingActionManager } from './pending-action-manager.mjs';
 import { ApprovalReceiptStore } from './approval-receipt-store.mjs';
 import { TimedGrantManager } from './timed-grant-manager.mjs';
+import { WcmTotpManager } from './totp.mjs';
 import {
   APPROVAL_UI_URI,
   approvalRouterTools,
@@ -98,6 +99,7 @@ const pendingActionManager = new PendingActionManager({
 const timedGrantManager = new TimedGrantManager({
   audit: approvalAudit,
 });
+const wcmTotpManager = new WcmTotpManager({ root: process.cwd() });
 const uuCliRunner = new UuCliRunner();
 let approvalPolicy = approvalPolicyStore.current();
 
@@ -477,8 +479,8 @@ function approvalIdStatusValue(approvalId) {
   const output = grantActive
     ? 'This approval_id has an active timed full-WCM grant. Pass it directly on routed WCM worker-tool calls to authorize them.'
     : classification === 'approval_id_unknown'
-      ? 'Unknown approval_id. Omit approval_id on a routed WCM worker-tool call to create a fresh independent approval.'
-      : 'This approval_id is not currently usable. Omit approval_id on a routed WCM worker-tool call to create a fresh independent approval.';
+      ? 'Unknown approval_id. In TOTP mode provide a new user-supplied code to wcm_unlock; in timed mode request a new approval card.'
+      : 'This approval_id is not currently usable. In TOTP mode provide a new user-supplied code to wcm_unlock; in timed mode request a new approval card.';
   return approvalStatus({
     classification,
     approval_required: request?.state === 'pending',
@@ -626,6 +628,41 @@ async function dispatchRoutedWorker({
 async function executeTool(payload, sourcePayload = null) {
   const toolName = payload?.params?.name;
 
+  if (toolName === 'wcm_unlock') {
+    const args = payload?.params?.arguments || {};
+    const policy = refreshApprovalPolicy();
+    if (policy.mode !== 'totp') {
+      return structuredToolResult({ classification: 'wcm_unlock_unavailable',
+        error: 'WCM is not in TOTP authorization mode.' }, { isError: true });
+    }
+    try {
+      const duration = validateApprovalDurationSeconds(args.duration_seconds);
+      if (!wcmTotpManager.verify(args.code)) {
+        return structuredToolResult({ classification: 'wcm_code_invalid',
+          error: 'Code invalid, already used or temporarily rate-limited.' }, { isError: true });
+      }
+      const id = randomUUID();
+      const grant = timedGrantManager.grant({
+        approvalId: id,
+        requestedDurationSeconds: duration,
+        operationId: 'totp-' + randomUUID(),
+        policyRevision: policy.revision,
+      });
+      return structuredToolResult({
+        classification: 'wcm_unlocked',
+        approval_id: id,
+        grant_scope: 'full_wcm',
+        grant_effect: 'all_routed_tools_all_registered_devices',
+        ...grantFields(grant),
+        output: 'WCM unlocked. Pass this approval_id with each WCM worker or uuyc_cli call. Prefer CCM unless the user explicitly requested WCM.',
+      });
+    } catch (error) {
+      routerLogger.error('wcm_unlock failed: ' + (error?.code || 'verification_error'));
+      return structuredToolResult({ classification: 'wcm_unlock_error',
+        error: 'WCM code verification unavailable or invalid.' }, { isError: true });
+    }
+  }
+
   if (toolName === 'restart_wcm') {
     try {
       return structuredToolResult(requestWcmRestart({
@@ -688,7 +725,7 @@ async function executeTool(payload, sourcePayload = null) {
     try {
       const policy = refreshApprovalPolicy();
       if (policy.mode !== 'timed') {
-        throw new Error('WCM approval mode is off; no approval request is active.');
+        throw new Error('WCM is not in timed approval-card mode; no approval request is active.');
       }
       const requestedDurationSeconds = validateApprovalDurationSeconds(args.duration_seconds);
       const prepared = pendingActionManager.prepareAppApproval(args.approval_id, {
@@ -898,7 +935,7 @@ async function executeTool(payload, sourcePayload = null) {
     const args = payload?.params?.arguments || {};
     const { approval_id, ...uuArguments } = args;
     const policy = refreshApprovalPolicy();
-    if (policy.mode === 'timed') {
+    if (policy.mode !== 'off') {
       if (approval_id) {
         const grant = timedGrantManager.active(approval_id);
         if (!grant) return structuredToolResult(approvalIdStatusValue(approval_id), { isError: true });
@@ -910,6 +947,10 @@ async function executeTool(payload, sourcePayload = null) {
           return structuredToolResult({ error: String(error?.message || error) }, { isError: true });
         }
       }
+      if (policy.mode === 'totp') return structuredToolResult({
+        classification: 'wcm_code_required',
+        error: 'WCM requires a user-provided six-digit authenticator code via wcm_unlock or an active approval_id.',
+      }, { isError: true });
       const pending = pendingActionManager.ensurePending({
         deviceId: registry.defaultDeviceId,
         toolName: 'uuyc_cli',
@@ -935,7 +976,7 @@ async function executeTool(payload, sourcePayload = null) {
 
   const policy = refreshApprovalPolicy();
   const workerArguments = mapPathArguments(stripDeviceRoutingArguments(args), device);
-  if (policy.mode === 'timed') {
+  if (policy.mode !== 'off') {
     if (args?.approval_id) {
       const grant = timedGrantManager.active(args.approval_id);
       if (!grant) {
@@ -949,6 +990,10 @@ async function executeTool(payload, sourcePayload = null) {
         requestIdPrefix: 'grant',
       });
     }
+    if (policy.mode === 'totp') return structuredToolResult({
+      classification: 'wcm_code_required',
+      error: 'WCM requires a user-provided six-digit authenticator code via wcm_unlock or an active approval_id.',
+    }, { isError: true });
     const pending = pendingActionManager.ensurePending({
       deviceId: device.deviceId,
       toolName,
@@ -969,7 +1014,7 @@ async function executeTool(payload, sourcePayload = null) {
   });
 }
 function sdkInstructions() {
-  return `Every Desktop Commander worker tool requires an explicit deviceId and also exposes an optional Router-only approval_id. WCM approval mode is controlled locally. In timed mode, omit approval_id to freeze that worker-tool call and receive a fresh independent approval_id; call request_approval with that ID and an optional duration_seconds (default 21600). After approval, pass that exact active approval_id directly on later routed WCM tool calls to reuse its timed full-WCM grant. WCM never auto-selects another active grant. Multiple approval IDs can remain active concurrently. In off mode, routed tools execute directly and any supplied approval_id is stripped before forwarding. Router-local restart_wcm requires no arguments, deviceId, or approval; it requests only a fixed Supervisor-managed Controller restart and may briefly interrupt MCP connections. list_devices reports only aggregate approval counts; approval_status performs point lookup for an ID you already possess. Default device: ${registry.defaultDeviceId}.\n\n${SPECIALIZED_CAPABILITIES}\n\n${WCM_ERROR_SEMANTICS}`;
+  return `Prefer CCM for ordinary work. Only use WCM when the user explicitly requests it. Every Desktop Commander worker tool requires an explicit deviceId and optionally accepts a Router-only approval_id. WCM approval mode is controlled locally. In totp mode, a user must explicitly provide their six-digit phone authenticator code; call wcm_unlock with that code and optional duration_seconds (default 21600) to get an approval_id. Without an active ID, WCM worker tools and UU CLI fail closed; never retrieve the TOTP setup secret yourself. In timed mode, omit approval_id to freeze a worker-tool call and receive an approval_id; call request_approval with it to show an approval card. Pass the active approval_id on every later routed WCM call. WCM never auto-selects an active grant. Multiple IDs can coexist. In off mode, tools execute directly. Router-local restart_wcm is a no-approval Supervisor restart exception. list_devices shows aggregate status; approval_status is a point lookup. Default device: ${registry.defaultDeviceId}.\n\n${SPECIALIZED_CAPABILITIES}\n\n${WCM_ERROR_SEMANTICS}`;
 }
 
 function unwrapRoutedResult(message, fallback) {

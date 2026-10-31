@@ -37,6 +37,11 @@ assert.equal(refreshed.changed, true);
 assert.equal(refreshed.policy.mode, 'off');
 assert.equal(refreshed.policy.revision, 1);
 
+fs.writeFileSync(policyFile, JSON.stringify({ version: 1, mode: 'totp', revision: 2 }));
+refreshed = store.refresh();
+assert.equal(refreshed.changed, true);
+assert.equal(refreshed.policy.mode, 'totp');
+
 refreshed = store.refresh();
 assert.equal(refreshed.changed, false);
 

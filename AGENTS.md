@@ -1,5 +1,13 @@
 # Agent Notes
 
+## WCM phone TOTP authorization
+
+- **Prefer CCM.** Only use WCM when explicitly requested, regardless of whether a valid WCM grant is already known.
+- In `totp` mode, `wcm_unlock` exchanges a six-digit phone code that the user explicitly provided for the existing style of full-WCM timed `approval_id`. Both WCM worker tools and `uuyc_cli` require that ID. Missing authorization fails closed, without a card. The separate `timed` mode retains manual approval cards.
+- Phone setup happens only in the **user's own local/UU terminal** via `scripts/manage-wcm-totp.ps1 -Action Init` and `-Action Confirm -Code ...`. Never run Init or ReadForRouter through CCM/WCM to display the production seed in model context. The initial seed is permanent until deliberate Reset. Local confirmation changes the approval mode and revokes existing grants.
+- DPAPI CurrentUser stores the 20-byte seed outside Git in `%LOCALAPPDATA%\WCM\secrets\totp.dpapi`; replay/lockout state lives beside it. Enrollment and Controller Supervisor must use the same Windows account. Do not log plaintext codes, secrets or full grant IDs.
+- Do not automatically activate TOTP at deployment: the user must pair their phone first. Refresh tools after supervised Router restart. Use independent CCM for tests and restart observation.
+
 ## MCP branding asset
 
 - The only published WCM icon path is `/rdc/icon.png` (served by the OAuth sidecar without credentials); its bytes come exclusively from `assets/wcm-icon.png`. No general file-serving routes or authentication exemptions for `/rdc/mcp`.

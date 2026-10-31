@@ -142,6 +142,7 @@ async function verifySurface(client, { exerciseApproval = false } = {}) {
   const tools = (await client.listTools()).tools;
   for (const name of [
     'list_devices',
+    'wcm_unlock',
     'approval_status',
     'request_approval',
     'resolve_pending_action',

@@ -59,6 +59,33 @@ function approvalOutputSchema() {
 export function approvalRouterTools() {
   return [
     {
+      name: 'wcm_unlock',
+      description: [
+        'Exchange a six-digit code supplied explicitly by the user from their phone authenticator for a WCM full-access timed grant.',
+        'Use ONLY when the user explicitly asks to use WCM and supplies the current code; CCM is the default for ordinary work.',
+        'Works only while local approval mode is totp. The same returned approval_id grants access to WCM worker tools and uuyc_cli.',
+        'The code is one-time, valid for approximately 30 seconds. Default grant duration is 21600 seconds (6 hours).',
+        'Never fetch TOTP secrets or generate codes yourself, and never include the code in logs.',
+      ].join('\n\n'),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+      execution: { taskSupport: 'forbidden' },
+      inputSchema: {
+        type: 'object',
+        properties: {
+          code: { type: 'string', pattern: '^[0-9]{6}$', description: 'Current six-digit user-provided authenticator code.' },
+          duration_seconds: {
+            type: 'integer',
+            minimum: MIN_APPROVAL_DURATION_SECONDS,
+            maximum: MAX_APPROVAL_DURATION_SECONDS,
+            default: DEFAULT_APPROVAL_DURATION_SECONDS,
+          },
+        },
+        required: ['code'],
+        additionalProperties: false,
+        $schema: 'http://json-schema.org/draft-07/schema#',
+      },
+    },
+    {
       name: 'approval_status',
       description: [
         'Inspect one WCM approval_id that you already possess.',

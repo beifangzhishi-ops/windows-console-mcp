@@ -33,6 +33,10 @@ assert.deepEqual(stripDeviceRoutingArguments({
 }), { value: 'forward-me' });
 
 const approvalTools = approvalRouterTools();
+const unlockTool = approvalTools.find((tool) => tool.name === 'wcm_unlock');
+assert.deepEqual(unlockTool.inputSchema.required, ['code']);
+assert.equal(unlockTool.inputSchema.properties.code.pattern, '^[0-9]{6}$');
+assert.equal(unlockTool.inputSchema.properties.duration_seconds.default, 21600);
 assert.equal(RESTART_WCM_TOOL.name, 'restart_wcm');
 assert.deepEqual(RESTART_WCM_TOOL.inputSchema.required, undefined);
 assert.deepEqual(RESTART_WCM_TOOL.inputSchema.properties, {});
@@ -44,7 +48,7 @@ const resolver = approvalTools.find((tool) => tool.name === 'resolve_pending_act
 assert.ok(statusTool && verifiedStatus && requestCard && resolver);
 assert.deepEqual(
   approvalTools.map((tool) => tool.name),
-  ['approval_status', 'get_approval_status', 'request_approval', 'resolve_pending_action'],
+  ['wcm_unlock', 'approval_status', 'get_approval_status', 'request_approval', 'resolve_pending_action'],
 );
 assert.deepEqual(statusTool.inputSchema.required, ['approval_id']);
 assert.deepEqual(verifiedStatus.inputSchema.required, ['approval_id', 'approval_nonce']);
