@@ -57,7 +57,8 @@ function Get-Totp([byte[]]$Secret, [long]$Counter) {
 function Test-Code([byte[]]$Secret, [string]$Provided) {
   if ($Provided -cnotmatch '^[0-9]{6}$') { return $false }
   $counter = [long][Math]::Floor(([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) / 30)
-  foreach ($step in @($counter - 1, $counter, $counter + 1)) {
+  foreach ($offset in @(-1, 0, 1)) {
+    $step = $counter + $offset
     if ((Get-Totp $Secret $step) -ceq $Provided) { return $true }
   }
   return $false
@@ -68,6 +69,14 @@ switch ($Action) {
     $knownSecret = [Text.Encoding]::ASCII.GetBytes('12345678901234567890')
     if ((Get-Totp $knownSecret 1) -ne '287082') { throw 'TOTP implementation did not match the RFC test vector.' }
     if ((Get-Totp $knownSecret 37037036) -ne '081804') { throw 'TOTP implementation failed the second RFC test vector.' }
+    $currentCounter = [long][Math]::Floor(([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) / 30)
+    foreach ($offset in @(-1, 0, 1)) {
+      $liveTestCode = Get-Totp $knownSecret ($currentCounter + $offset)
+      if (-not (Test-Code $knownSecret $liveTestCode)) {
+        throw ('TOTP confirmation check failed for time offset ' + $offset + '.')
+      }
+    }
+    if (Test-Code $knownSecret 'invalid') { throw 'TOTP confirmation accepted invalid code.' }
     Write-Output 'TOTP PowerShell self-test: PASS'
     break
   }

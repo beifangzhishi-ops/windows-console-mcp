@@ -7,6 +7,7 @@
 - Phone setup happens only in the **user's own local/UU terminal** via `scripts/manage-wcm-totp.ps1 -Action Init` and `-Action Confirm -Code ...`. Never run Init or ReadForRouter through CCM/WCM to display the production seed in model context. The initial seed is permanent until deliberate Reset. Local confirmation changes the approval mode and revokes existing grants.
 - DPAPI CurrentUser stores the 20-byte seed outside Git in `%LOCALAPPDATA%\WCM\secrets\totp.dpapi`; replay/lockout state lives beside it. Enrollment and Controller Supervisor must use the same Windows account. Do not log plaintext codes, secrets or full grant IDs.
 - Do not automatically activate TOTP at deployment: the user must pair their phone first. Refresh tools after supervised Router restart. Use independent CCM for tests and restart observation.
+- Before changing the PowerShell TOTP confirmation flow, run `scripts/manage-wcm-totp.ps1 -Action SelfTest` in independent CCM. It must execute `Test-Code` for previous/current/next 30-second steps, not just test `Get-Totp` RFC vectors. Do not use live OTPs or reveal the production seed in regression tests.
 
 ## MCP branding asset
 
