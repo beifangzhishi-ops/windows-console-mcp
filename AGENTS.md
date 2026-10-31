@@ -8,6 +8,7 @@
 - DPAPI CurrentUser stores the 20-byte seed outside Git in `%LOCALAPPDATA%\WCM\secrets\totp.dpapi`; replay/lockout state lives beside it. Enrollment and Controller Supervisor must use the same Windows account. Do not log plaintext codes, secrets or full grant IDs.
 - Do not automatically activate TOTP at deployment: the user must pair their phone first. Refresh tools after supervised Router restart. Use independent CCM for tests and restart observation.
 - Before changing the PowerShell TOTP confirmation flow, run `scripts/manage-wcm-totp.ps1 -Action SelfTest` in independent CCM. It must execute `Test-Code` for the agreed ~5-minute lookback (10 prior 30-second steps), current step, and one future step, not just test `Get-Totp` RFC vectors. Do not use live OTPs or reveal the production seed in regression tests. Keep the Node Router window aligned with the PowerShell confirmation window.
+- The live SDK E2E must support `totp` mode without redeeming a phone code: assert that worker tools, UU CLI and unknown grant IDs fail closed. It must still check `wcm_unlock` discovery across the local Router and OAuth sidecar.
 
 ## MCP branding asset
 

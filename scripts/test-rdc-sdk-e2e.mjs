@@ -16,6 +16,7 @@ const approvalDurationSeconds = Number(process.env.RDC_E2E_APPROVAL_DURATION_SEC
 const omitApprovalDuration = process.env.RDC_E2E_OMIT_APPROVAL_DURATION === '1';
 const expectedApprovalDurationSeconds = omitApprovalDuration ? 21600 : approvalDurationSeconds;
 let approvalFlowExercised = false;
+let totpGatingVerified = false;
 
 async function request(path, options = {}) {
   const response = await fetch(sidecarBase + path, { redirect: 'manual', ...options });
@@ -186,6 +187,29 @@ async function verifySurface(client, { exerciseApproval = false } = {}) {
     }
     if (ordinary.isError) throw new Error('ordinary get_config routing failed in off mode.');
     return;
+  }
+  if (deviceInfo.approval?.mode === 'totp') {
+    if (!ordinary.isError || ordinary.structuredContent?.classification !== 'wcm_code_required') {
+      throw new Error('TOTP mode did not deny get_config without an active grant.');
+    }
+    const uu = await client.callTool({
+      name: 'uuyc_cli', arguments: { args: ['device', 'ls', '--json'] },
+    });
+    if (!uu.isError || uu.structuredContent?.classification !== 'wcm_code_required') {
+      throw new Error('TOTP mode did not deny UU CLI without an active grant.');
+    }
+    const unknown = await client.callTool({
+      name: 'get_config',
+      arguments: { deviceId, approval_id: '00000000-0000-4000-8000-000000000099' },
+    });
+    if (!unknown.isError || unknown.structuredContent?.classification !== 'approval_id_unknown') {
+      throw new Error('TOTP mode did not reject an unknown grant ID.');
+    }
+    totpGatingVerified = true;
+    return;
+  }
+  if (deviceInfo.approval?.mode !== 'timed') {
+    throw new Error('Unknown WCM approval mode in SDK E2E.');
   }
   approvalFlowExercised = true;
   if (ordinary.structuredContent?.approval_required !== true) {
@@ -390,6 +414,8 @@ async function main() {
   console.log('approval_mode_routing=PASS');
   if (approvalFlowExercised) {
     console.log(`approval_${approvalDecision}_roundtrip=PASS`);
+  } else if (totpGatingVerified) {
+    console.log('totp_missing_grant_fail_closed=PASS');
   } else {
     console.log('approval_off_direct_routing=PASS');
   }
