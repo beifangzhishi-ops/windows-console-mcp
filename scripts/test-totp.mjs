@@ -16,6 +16,20 @@ const makeManager = (options = {}) => new WcmTotpManager({
 });
 
 try {
+  const windowTime = 10_000_000;
+  const currentWindow = Math.floor(windowTime / 30000);
+  assert.equal(makeManager({
+    stateFile: path.join(dir, 'window-oldest.json'), now: () => windowTime,
+  }).verify(totpForCounter(secret, currentWindow - 10)), true,
+  'a code generated approximately five minutes earlier must be accepted');
+  assert.equal(makeManager({
+    stateFile: path.join(dir, 'window-too-old.json'), now: () => windowTime,
+  }).verify(totpForCounter(secret, currentWindow - 11)), false,
+  'codes beyond the lookback must be rejected');
+  assert.equal(makeManager({
+    stateFile: path.join(dir, 'window-future.json'), now: () => windowTime,
+  }).verify(totpForCounter(secret, currentWindow + 1)), true,
+  'accept one future step for mild clock drift');
   const first = makeManager();
   const counter = Math.floor(time / 30000);
   assert.equal(first.verify(totpForCounter(secret, counter)), true);

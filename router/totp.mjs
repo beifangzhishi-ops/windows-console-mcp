@@ -5,6 +5,10 @@ import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 
 const STEP_MS = 30_000;
+// Let a phone code be entered through a remote terminal or chat for roughly five minutes.
+// The authenticator still follows standard 30-second TOTP periods.
+const MAX_PAST_STEPS = 10;
+const MAX_FUTURE_STEPS = 1;
 const MAX_FAILURES = 5;
 const LOCK_MS = 5 * 60_000;
 
@@ -85,7 +89,8 @@ export class WcmTotpManager {
     const current = Math.floor(now / STEP_MS);
     let matchingCounter = -1;
     if (typeof code === 'string' && /^\d{6}$/.test(code)) {
-      for (const counter of [current - 1, current, current + 1]) {
+      for (let counter = current - MAX_PAST_STEPS;
+        counter <= current + MAX_FUTURE_STEPS; counter++) {
         if (counter <= state.lastCounter || counter < 0) continue;
         const expected = totpForCounter(secret, counter);
         if (timingSafeEqual(Buffer.from(code), Buffer.from(expected))) {

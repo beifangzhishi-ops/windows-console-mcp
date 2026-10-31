@@ -7,7 +7,7 @@
 - Phone setup happens only in the **user's own local/UU terminal** via `scripts/manage-wcm-totp.ps1 -Action Init` and `-Action Confirm -Code ...`. Never run Init or ReadForRouter through CCM/WCM to display the production seed in model context. The initial seed is permanent until deliberate Reset. Local confirmation changes the approval mode and revokes existing grants.
 - DPAPI CurrentUser stores the 20-byte seed outside Git in `%LOCALAPPDATA%\WCM\secrets\totp.dpapi`; replay/lockout state lives beside it. Enrollment and Controller Supervisor must use the same Windows account. Do not log plaintext codes, secrets or full grant IDs.
 - Do not automatically activate TOTP at deployment: the user must pair their phone first. Refresh tools after supervised Router restart. Use independent CCM for tests and restart observation.
-- Before changing the PowerShell TOTP confirmation flow, run `scripts/manage-wcm-totp.ps1 -Action SelfTest` in independent CCM. It must execute `Test-Code` for previous/current/next 30-second steps, not just test `Get-Totp` RFC vectors. Do not use live OTPs or reveal the production seed in regression tests.
+- Before changing the PowerShell TOTP confirmation flow, run `scripts/manage-wcm-totp.ps1 -Action SelfTest` in independent CCM. It must execute `Test-Code` for the agreed ~5-minute lookback (10 prior 30-second steps), current step, and one future step, not just test `Get-Totp` RFC vectors. Do not use live OTPs or reveal the production seed in regression tests. Keep the Node Router window aligned with the PowerShell confirmation window.
 
 ## MCP branding asset
 
@@ -54,7 +54,7 @@
 ## UU CLI Router integration
 
 - `uuyc_cli` is a **single Router-local WCM tool** exposing original UU CLI argument tokens and optional persistent ConPTY stdin/session_id. Never split it into separate device/terminal/exec tools and do not modify upstream Desktop Commander or its worker protocol for UU support.
-- All calls, including session polling, stdin, and close, reuse **the existing WCM full-access timed grant** via `approval_id`. Missing grant must generate a normal WCM approval card. No independent UU approval, UI, policy, or grant store. Sessions are associated with their exact initial grant and must expire/terminate with it or on WCM policy changes. An approval owner action must execute at most once; command failures should be consumed, not automatically replayed.
+- All calls, including session polling, stdin, and close, reuse **the existing WCM full-access timed grant** via `approval_id`. In `totp` mode missing grant must fail closed and require a phone code via `wcm_unlock`; in `timed` mode it generates a normal WCM approval card. No independent UU approval, UI, policy, or grant store. Sessions are associated with their exact initial grant and must expire/terminate with it or on WCM policy changes. An approval owner action must execute at most once; command failures should be consumed, not automatically replayed.
 - The PTY adapter runs **only on the Controller's Windows machine**. A temporary remote computer needs only UU Remote, never a WCM Worker, Python, SSH or Tailscale. Do not move the bridge or install its dependencies on UU target devices. Router login context needs live UU GUI IPC. Never interpret UU error 127 (remote desktop in use) as a WCM policy refusal.
 - `@lydell/node-pty` contains Windows ConPTY prebuilds. Preserve its platform optional dependencies when installing/updating WCM. `scripts/test-uu-cli.mjs` validates argument passthrough, session ownership and expiry.
 
