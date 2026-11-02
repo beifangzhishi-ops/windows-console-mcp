@@ -1,5 +1,12 @@
 # Agent Notes
 
+## Why WCM requires human approval
+
+- **The owner's purpose is to prevent accidental or unintended model use of WCM, not to build a high-security lock against the owner.** WCM is an elevated, powerful fallback to CCM; its approval is a deliberate human-in-the-loop safety catch (`防呆`) to ensure the model does not casually use WCM. Prefer CCM for ordinary work, and do not treat WCM approval as a substitute for Windows permissions or network access control.
+- Optimize the owner's authorization interaction for **one intentional gesture and minimal friction**. A fixed mobile-friendly page where the owner taps **Temporarily unlock** is preferable to having the owner copy a changing six-digit code into ChatGPT. ChatGPT tool calls containing TOTP codes have sometimes been blocked before reaching WCM, so model-mediated OTP submission is not a dependable primary UX.
+- Desired web unlock behavior (design intent, **not yet implemented**): one owner-initiated tap issues an ordinary, bounded full-WCM timed grant that the model can subsequently receive/reuse. The web page immediately returns to its locked/ready-to-unlock state to prevent accidental repeat issuance; **this does not revoke the already-issued grant**, which expires by its own timer or explicit revocation. Never accomplish this by switching the global approval policy to `off` or by opening a public, unauthenticated full-access unlock endpoint. Keep the page owner-accessible and protect the actual grant handoff without making the owner's gesture cumbersome.
+- Approval cards remain a valid independent human-approval path. Do not add a second permission database or require multiple confirmations for the same unlock. A streamlined website is a UX alternative, not a mandate to change the active approval mechanism before implementation is explicitly requested.
+
 ## WCM phone TOTP authorization
 
 - **Prefer CCM.** Only use WCM when explicitly requested, regardless of whether a valid WCM grant is already known.
