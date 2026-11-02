@@ -29,7 +29,7 @@ export const UU_CLI_TOOL = {
       timeout_ms: { type: 'integer', minimum: 0, maximum: MAX_WAIT_MS,
         description: 'Wait for new terminal output or exit, max 20 seconds; defaults to 3 seconds.' },
       approval_id: { type: 'string', format: 'uuid',
-        description: 'Existing WCM timed full-access approval ID. Omit to request the standard WCM approval card.' },
+        description: 'Existing WCM full-access timed approval ID, obtained via card or phone code. Omit for a card in timed or both mode; totp-only mode requires an active ID.' },
     },
     additionalProperties: false,
   },

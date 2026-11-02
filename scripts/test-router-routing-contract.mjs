@@ -25,6 +25,7 @@ assert.deepEqual(routedSchema.required.sort(), ['deviceId', 'value'].sort());
 assert.deepEqual(routedSchema.properties.deviceId.enum, ['device-a', 'device-b']);
 assert.equal(routedSchema.properties.approval_id.type, 'string');
 assert.equal(routedSchema.properties.approval_id.format, 'uuid');
+assert.match(routedSchema.properties.approval_id.description, /both mode/u);
 assert.equal(routedSchema.required.includes('approval_id'), false);
 assert.deepEqual(stripDeviceRoutingArguments({
   deviceId: 'device-a',
@@ -37,6 +38,7 @@ const unlockTool = approvalTools.find((tool) => tool.name === 'wcm_unlock');
 assert.deepEqual(unlockTool.inputSchema.required, ['code']);
 assert.equal(unlockTool.inputSchema.properties.code.pattern, '^[0-9]{6}$');
 assert.equal(unlockTool.inputSchema.properties.duration_seconds.default, 21600);
+assert.match(unlockTool.description, /totp or both mode/u);
 assert.equal(RESTART_WCM_TOOL.name, 'restart_wcm');
 assert.deepEqual(RESTART_WCM_TOOL.inputSchema.required, undefined);
 assert.deepEqual(RESTART_WCM_TOOL.inputSchema.properties, {});

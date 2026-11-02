@@ -208,12 +208,36 @@ async function verifySurface(client, { exerciseApproval = false } = {}) {
     totpGatingVerified = true;
     return;
   }
-  if (deviceInfo.approval?.mode !== 'timed') {
+  if (!['timed', 'both'].includes(deviceInfo.approval?.mode)) {
     throw new Error('Unknown WCM approval mode in SDK E2E.');
   }
   approvalFlowExercised = true;
   if (ordinary.structuredContent?.approval_required !== true) {
-    throw new Error('timed mode get_config did not return approval_required=true.');
+    throw new Error('approval-card mode get_config did not return approval_required=true.');
+  }
+
+  if (deviceInfo.approval?.mode === 'both') {
+    // Duration validation rejects before TOTP verification: prove this path is
+    // enabled without handling a production phone code or affecting replay state.
+    const unlockProbe = await client.callTool({
+      name: 'wcm_unlock', arguments: { duration_seconds: 0 },
+    });
+    if (unlockProbe.structuredContent?.classification !== 'wcm_unlock_error') {
+      throw new Error('both mode did not expose the TOTP unlock path.');
+    }
+    const uu = await client.callTool({
+      name: 'uuyc_cli', arguments: { args: ['device', 'ls', '--json'] },
+    });
+    if (uu.structuredContent?.approval_required !== true) {
+      throw new Error('both mode UU CLI did not offer an approval card.');
+    }
+    const unknown = await client.callTool({
+      name: 'get_config',
+      arguments: { deviceId, approval_id: '00000000-0000-4000-8000-000000000099' },
+    });
+    if (!unknown.isError || unknown.structuredContent?.classification !== 'approval_id_unknown') {
+      throw new Error('both mode accepted an unknown grant ID.');
+    }
   }
 
   const sessionMeta = { 'openai/session': 'wcm-sdk-e2e-session' };

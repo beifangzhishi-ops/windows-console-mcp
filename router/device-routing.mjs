@@ -10,7 +10,7 @@ export function withDeviceRoutingSchema(inputSchema, deviceSchema) {
       type: 'string',
       format: 'uuid',
       pattern: '^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$',
-      description: 'Optional WCM timed-grant approval ID. In timed mode, omit it to create a new independent approval request; pass an active ID to reuse that exact grant.',
+      description: 'Optional WCM full-access timed grant ID, obtained via approval card or phone code. Omit in timed or both mode for a new independent approval card; totp-only mode requires an active ID. Pass an active ID to reuse exactly that grant.',
     },
   };
   schema.required = Array.from(new Set([

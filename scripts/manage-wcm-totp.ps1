@@ -101,14 +101,14 @@ switch ($Action) {
     Write-Output ('Manual setup key: ' + $base32)
     Write-Output ('OTP URI: otpauth://totp/WCM:6v?secret=' + $base32 + '&issuer=WCM&algorithm=SHA1&digits=6&period=30')
     Write-Output 'Add this key to a TOTP app as SHA1 / 6 digits / 30 seconds.'
-    Write-Output 'Next, run Confirm with one code shown by the app. That switches WCM to TOTP mode.'
+    Write-Output 'Next, run Confirm with one code shown by the app. That enables both phone codes and approval cards.'
     Write-Output 'Do not paste this setup key or OTP URI into ChatGPT.'
     break
   }
   'Confirm' {
     if (-not (Test-Code (Get-Secret) $Code)) { throw 'Invalid authenticator code; WCM approval mode was not changed.' }
-    & $policyScript -Mode Totp
-    Write-Output 'Phone paired and WCM switched to TOTP approval mode. Existing timed grants are revoked by the policy revision.'
+    & $policyScript -Mode Both
+    Write-Output 'Phone paired. Both TOTP codes and approval cards are enabled. Existing grants are revoked if the mode changed.'
     break
   }
   'ReadForRouter' {

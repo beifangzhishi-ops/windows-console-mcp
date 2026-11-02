@@ -479,8 +479,8 @@ function approvalIdStatusValue(approvalId) {
   const output = grantActive
     ? 'This approval_id has an active timed full-WCM grant. Pass it directly on routed WCM worker-tool calls to authorize them.'
     : classification === 'approval_id_unknown'
-      ? 'Unknown approval_id. In TOTP mode provide a new user-supplied code to wcm_unlock; in timed mode request a new approval card.'
-      : 'This approval_id is not currently usable. In TOTP mode provide a new user-supplied code to wcm_unlock; in timed mode request a new approval card.';
+      ? 'Unknown approval_id. Request a new approval card when available, or provide a user-supplied code to wcm_unlock when TOTP is enabled.'
+      : 'This approval_id is not currently usable. Request a new approval card when available, or provide a user-supplied code to wcm_unlock when TOTP is enabled.';
   return approvalStatus({
     classification,
     approval_required: request?.state === 'pending',
@@ -631,7 +631,7 @@ async function executeTool(payload, sourcePayload = null) {
   if (toolName === 'wcm_unlock') {
     const args = payload?.params?.arguments || {};
     const policy = refreshApprovalPolicy();
-    if (policy.mode !== 'totp') {
+    if (!['totp', 'both'].includes(policy.mode)) {
       return structuredToolResult({ classification: 'wcm_unlock_unavailable',
         error: 'WCM is not in TOTP authorization mode.' }, { isError: true });
     }
@@ -724,7 +724,7 @@ async function executeTool(payload, sourcePayload = null) {
     const args = payload?.params?.arguments || {};
     try {
       const policy = refreshApprovalPolicy();
-      if (policy.mode !== 'timed') {
+      if (!['timed', 'both'].includes(policy.mode)) {
         throw new Error('WCM is not in timed approval-card mode; no approval request is active.');
       }
       const requestedDurationSeconds = validateApprovalDurationSeconds(args.duration_seconds);
@@ -796,7 +796,7 @@ async function executeTool(payload, sourcePayload = null) {
       if (args.decision !== 'approve') {
         throw new Error('decision must be approve or deny.');
       }
-      if (policy.mode !== 'timed') {
+      if (!['timed', 'both'].includes(policy.mode)) {
         throw new Error('WCM approval mode changed before this request was approved.');
       }
 
@@ -1014,7 +1014,7 @@ async function executeTool(payload, sourcePayload = null) {
   });
 }
 function sdkInstructions() {
-  return `Prefer CCM for ordinary work. Only use WCM when the user explicitly requests it. Every Desktop Commander worker tool requires an explicit deviceId and optionally accepts a Router-only approval_id. WCM approval mode is controlled locally. In totp mode, a user must explicitly provide their six-digit phone authenticator code; call wcm_unlock with that code and optional duration_seconds (default 21600) to get an approval_id. Without an active ID, WCM worker tools and UU CLI fail closed; never retrieve the TOTP setup secret yourself. In timed mode, omit approval_id to freeze a worker-tool call and receive an approval_id; call request_approval with it to show an approval card. Pass the active approval_id on every later routed WCM call. WCM never auto-selects an active grant. Multiple IDs can coexist. In off mode, tools execute directly. Router-local restart_wcm is a no-approval Supervisor restart exception. list_devices shows aggregate status; approval_status is a point lookup. Default device: ${registry.defaultDeviceId}.\n\n${SPECIALIZED_CAPABILITIES}\n\n${WCM_ERROR_SEMANTICS}`;
+  return `Prefer CCM for ordinary work. Only use WCM when the user explicitly requests it. Every Desktop Commander worker tool requires an explicit deviceId and optionally accepts a Router-only approval_id. WCM approval mode is controlled locally. In both mode, use either a user-provided six-digit phone code with wcm_unlock or an approval card. In totp or both mode, call wcm_unlock with the user-provided code and optional duration_seconds (default 21600) to get an approval_id; never retrieve the TOTP setup secret yourself. In timed or both mode, omit approval_id on a routed tool call to freeze it and receive an approval_id; call request_approval with it to show an approval card. In totp-only mode, a missing approval_id fails closed without generating a card. Pass the active approval_id on every later routed WCM call, including UU CLI. WCM never auto-selects an active grant. Multiple IDs can coexist. In off mode, tools execute directly. Router-local restart_wcm is a no-approval Supervisor restart exception. list_devices shows aggregate status; approval_status is a point lookup. Default device: ${registry.defaultDeviceId}.\n\n${SPECIALIZED_CAPABILITIES}\n\n${WCM_ERROR_SEMANTICS}`;
 }
 
 function unwrapRoutedResult(message, fallback) {

@@ -63,7 +63,7 @@ export function approvalRouterTools() {
       description: [
         'Exchange a six-digit code supplied explicitly by the user from their phone authenticator for a WCM full-access timed grant.',
         'Use ONLY when the user explicitly asks to use WCM and supplies the current code; CCM is the default for ordinary work.',
-        'Works only while local approval mode is totp. The same returned approval_id grants access to WCM worker tools and uuyc_cli.',
+        'Works in totp or both mode. In both mode approval cards are also available; the returned approval_id grants the same access to WCM worker tools and uuyc_cli.',
         'The authenticator generates a new code every 30 seconds; WCM accepts codes from approximately the last five minutes. A successfully redeemed code cannot be reused. Default grant duration is 21600 seconds (6 hours).',
         'Never fetch TOTP secrets or generate codes yourself, and never include the code in logs.',
       ].join('\n\n'),
