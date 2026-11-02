@@ -744,9 +744,25 @@ async function handleWebUnlock(request, response, runtime, url) {
     return;
   }
   const expectedOrigin = new URL(runtime.config.issuer).origin;
-  if (request.method === 'POST' && request.headers.origin !== expectedOrigin) {
-    sendJson(response, 403, { error: 'invalid_origin' }, { noStore: true });
-    return;
+  if (request.method === 'POST') {
+    // Some Android in-app browsers omit Origin on a normal HTML form POST.
+    // Treat an explicitly foreign (or opaque "null") origin as hostile, but
+    // allow an absent Origin to reach the Router's mandatory double-submit
+    // CSRF verification. Never fall back from a *mismatched* Origin.
+    const origin = request.headers.origin;
+    const referer = request.headers.referer;
+    const fetchSite = request.headers['sec-fetch-site'];
+    let refererOrigin = null;
+    if (referer !== undefined) {
+      try { refererOrigin = new URL(referer).origin; }
+      catch { refererOrigin = 'invalid'; }
+    }
+    if ((origin !== undefined && origin !== expectedOrigin) ||
+        (referer !== undefined && refererOrigin !== expectedOrigin) ||
+        fetchSite === 'cross-site') {
+      sendJson(response, 403, { error: 'invalid_origin' }, { noStore: true });
+      return;
+    }
   }
   const body = request.method === 'POST' ? await readBody(request, 4096) : null;
   // This precise page route is the only public bridge to the Router's local

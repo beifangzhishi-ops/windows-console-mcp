@@ -393,6 +393,34 @@ async function main() {
     body: 'action=unlock',
   });
   requireStatus(invalidOrigin, 403);
+  if (invalidOrigin.json?.error !== 'invalid_origin') {
+    throw new Error('Cross-origin POST bypassed origin gate.');
+  }
+  for (const [name, headers] of [
+    ['opaque origin', { Origin: 'null' }],
+    ['foreign referer', { Referer: 'https://invalid.example/page' }],
+    ['cross-site fetch', { 'Sec-Fetch-Site': 'cross-site' }],
+  ]) {
+    const rejected = await request('/rdc/unlock', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...headers },
+      body: 'action=unlock',
+    });
+    requireStatus(rejected, 403);
+    if (rejected.json?.error !== 'invalid_origin') {
+      throw new Error(name + ' bypassed origin gate.');
+    }
+  }
+  const noOrigin = await request('/rdc/unlock', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'action=unlock',
+  });
+  requireStatus(noOrigin, 403);
+  if (noOrigin.json?.error === 'invalid_origin' ||
+      !noOrigin.text.includes('表单已过期')) {
+    throw new Error('No-Origin POST must reach Router CSRF gate, not be blocked by sidecar origin check.');
+  }
 
   stage = 'removed alias routes';
   const removedAlias = await request('/rdc/mcp-ccm');
