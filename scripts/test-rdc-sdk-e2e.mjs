@@ -388,38 +388,38 @@ async function main() {
       ownerPage.response.headers.get('cache-control')?.includes('no-store') !== true) {
     throw new Error('One-tap owner page is not served with no-store.');
   }
-  const invalidOrigin = await request('/rdc/unlock', {
-    method: 'POST', headers: { Origin: 'https://invalid.example', 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: 'action=unlock',
+  const csrf = ownerPage.text.match(/name="csrf" value="([^"]+)"/)?.[1];
+  const csrfCookie = ownerPage.response.headers.getSetCookie()
+    .find((header) => header.startsWith('__Secure-wcm-web-csrf='))
+    ?.split(';', 1)[0];
+  if (!csrf || !csrfCookie) throw new Error('Web page missing its form/cookie CSRF pair.');
+  const noCookie = await request('/rdc/unlock', {
+    method: 'POST',
+    headers: { Origin: 'null', 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ action: 'unlock', csrf, duration_seconds: '300' }).toString(),
   });
-  requireStatus(invalidOrigin, 403);
-  if (invalidOrigin.json?.error !== 'invalid_origin') {
-    throw new Error('Cross-origin POST bypassed origin gate.');
+  requireStatus(noCookie, 403);
+  if (!noCookie.text.includes('表单已过期')) {
+    throw new Error('Missing CSRF cookie must be denied by Router.');
   }
   for (const [name, headers] of [
-    ['opaque origin', { Origin: 'null' }],
-    ['foreign referer', { Referer: 'https://invalid.example/page' }],
-    ['cross-site fetch', { 'Sec-Fetch-Site': 'cross-site' }],
+    ['opaque Origin', { Origin: 'null' }],
+    ['rewritten Origin', { Origin: 'https://embedded.invalid' }],
+    ['foreign Referer', { Referer: 'https://embedded.invalid/browser' }],
+    ['cross-site Fetch Metadata', { 'Sec-Fetch-Site': 'cross-site' }],
+    ['missing Origin', {}],
   ]) {
-    const rejected = await request('/rdc/unlock', {
+    const result = await request('/rdc/unlock', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...headers },
-      body: 'action=unlock',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: csrfCookie, ...headers },
+      // Never attempt a production pairing/code verification. This is a
+      // paired-browser-independent action which must fail *after* CSRF.
+      body: new URLSearchParams({ csrf, action: 'unlock', duration_seconds: '300' }).toString(),
     });
-    requireStatus(rejected, 403);
-    if (rejected.json?.error !== 'invalid_origin') {
-      throw new Error(name + ' bypassed origin gate.');
+    requireStatus(result, 403);
+    if (!result.text.includes('请先配对浏览器')) {
+      throw new Error(name + ' prevented CSRF-valid page from reaching the paired-browser gate.');
     }
-  }
-  const noOrigin = await request('/rdc/unlock', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: 'action=unlock',
-  });
-  requireStatus(noOrigin, 403);
-  if (noOrigin.json?.error === 'invalid_origin' ||
-      !noOrigin.text.includes('表单已过期')) {
-    throw new Error('No-Origin POST must reach Router CSRF gate, not be blocked by sidecar origin check.');
   }
 
   stage = 'removed alias routes';
@@ -478,7 +478,7 @@ async function main() {
   console.log('RDC SDK MCP E2E: PASS');
   console.log('router_sdk_streamable_http=PASS');
   console.log('sidecar_oauth_resource=PASS');
-  console.log('web_unlock_page_origin_gate=PASS');
+  console.log('web_unlock_page_csrf_gate=PASS');
   console.log('refresh_token_rotation=PASS');
   console.log('sidecar_sdk_session=PASS');
   console.log('removed_alias_routes=PASS');

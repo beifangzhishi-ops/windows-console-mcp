@@ -578,8 +578,8 @@ function buildUpstreamHeaders(sourceHeaders, body, sessionId = null) {
   return headers;
 }
 
-function requestUpstreamBuffer(runtime, method, url, headers, body = null, pathOverride = null) {
-  const upstreamUrl = new URL(runtime.upstreamUrl);
+function requestUpstreamBuffer(runtime, method, url, headers, body = null, pathOverride = null, destination = runtime.upstreamUrl) {
+  const upstreamUrl = new URL(destination);
   return new Promise((resolve, reject) => {
     let settled = false;
     const upstreamRequest = http.request(
@@ -743,27 +743,11 @@ async function handleWebUnlock(request, response, runtime, url) {
     sendJson(response, 405, { error: 'method_not_allowed' }, { noStore: true });
     return;
   }
-  const expectedOrigin = new URL(runtime.config.issuer).origin;
-  if (request.method === 'POST') {
-    // Some Android in-app browsers omit Origin on a normal HTML form POST.
-    // Treat an explicitly foreign (or opaque "null") origin as hostile, but
-    // allow an absent Origin to reach the Router's mandatory double-submit
-    // CSRF verification. Never fall back from a *mismatched* Origin.
-    const origin = request.headers.origin;
-    const referer = request.headers.referer;
-    const fetchSite = request.headers['sec-fetch-site'];
-    let refererOrigin = null;
-    if (referer !== undefined) {
-      try { refererOrigin = new URL(referer).origin; }
-      catch { refererOrigin = 'invalid'; }
-    }
-    if ((origin !== undefined && origin !== expectedOrigin) ||
-        (referer !== undefined && refererOrigin !== expectedOrigin) ||
-        fetchSite === 'cross-site') {
-      sendJson(response, 403, { error: 'invalid_origin' }, { noStore: true });
-      return;
-    }
-  }
+  // Do not trust Origin/Referer/Fetch Metadata as an authorization gate here.
+  // Embedded Android browsers and VPN proxies can send missing, opaque, or
+  // rewritten values even for a real user submitting this same page.
+  // The Router independently enforces its nonce-based CSRF cookie + form
+  // token, paired browser identity, and (for pairing) a one-time TOTP.
   const body = request.method === 'POST' ? await readBody(request, 4096) : null;
   // This precise page route is the only public bridge to the Router's local
   // browser-pairing UI. Never proxy arbitrary router paths from the internet.
@@ -771,6 +755,7 @@ async function handleWebUnlock(request, response, runtime, url) {
     runtime, request.method, url,
     buildUpstreamHeaders(request.headers, body), body,
     '/web-unlock' + url.search,
+    runtime.webUnlockUpstreamUrl,
   );
   sendUpstreamResponse(response, upstream);
 }
@@ -880,6 +865,9 @@ export function createRdcServer(options = {}) {
     store,
     logger,
     upstreamUrl,
+    // Dedicated test-only dependency injection: production always uses the
+    // same local Router upstream; isolated E2E can use a mock-TOTP Router.
+    webUnlockUpstreamUrl: options.webUnlockUpstreamUrl ?? upstreamUrl,
     approvalSecret,
     iconFile: options.iconFile ?? MCP_ICON_FILE,
     registrationAttempts: new Map(),
