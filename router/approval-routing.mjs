@@ -59,12 +59,24 @@ function approvalOutputSchema() {
 export function approvalRouterTools() {
   return [
     {
+      name: 'wcm_claim_web_unlock',
+      description: 'Claim exactly one fresh owner-issued WCM timed grant after the owner taps Temporarily unlock on their paired WCM webpage. No code or URL required. Use only when the owner explicitly asks to use WCM. This read/claim tool never creates a grant or dispatches a worker action; if none is available, ask the owner to use their fixed unlock page. The returned approval_id works with all WCM devices and UU CLI.',
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+      execution: { taskSupport: 'forbidden' },
+      inputSchema: {
+        type: 'object', properties: {}, required: [], additionalProperties: false,
+        $schema: 'http://json-schema.org/draft-07/schema#',
+      },
+      outputSchema: approvalOutputSchema(),
+    },
+    {
       name: 'wcm_unlock',
       description: [
         'Exchange a six-digit code supplied explicitly by the user from their phone authenticator for a WCM full-access timed grant.',
         'Use ONLY when the user explicitly asks to use WCM and supplies the current code; CCM is the default for ordinary work.',
         'Works in totp or both mode. In both mode approval cards are also available; the returned approval_id grants the same access to WCM worker tools and uuyc_cli.',
         'The authenticator generates a new code every 30 seconds; WCM accepts codes from approximately the last five minutes. A successfully redeemed code cannot be reused. Default grant duration is 21600 seconds (6 hours).',
+        'If ChatGPT blocks a tool invocation before WCM receives it (for example, a host safety-check error), NEVER ask the user to resend the code or retry an encoded/obfuscated code. In both mode directly fall back to a normal approval card: call the intended WCM worker tool or uuyc_cli without approval_id to freeze it, then request_approval with the returned approval_id. If the user only submitted a code and no action was specified, use the harmless get_usage_stats tool on the list_devices default device to freeze a safe owner action, then call request_approval. Inform the user why a card appeared. This is an assistant-side fallback because WCM cannot observe calls rejected by the host before dispatch.',
         'Never fetch TOTP secrets or generate codes yourself, and never include the code in logs.',
       ].join('\n\n'),
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },

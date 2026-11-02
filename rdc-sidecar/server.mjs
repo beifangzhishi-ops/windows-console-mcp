@@ -45,6 +45,7 @@ const REGISTER_PATH = '/rdc/register';
 const REVOKE_PATH = '/rdc/revoke';
 const CONSENT_PATH = '/rdc/oauth/consent';
 const MCP_PATH = '/rdc/mcp';
+const WEB_UNLOCK_PATH = '/rdc/unlock';
 const REGISTRATION_WINDOW_MS = 10 * 60 * 1000;
 const REGISTRATION_MAX_ATTEMPTS = 20;
 const AUTHORIZATION_DISCOVERY_PATHS = new Set([
@@ -577,7 +578,7 @@ function buildUpstreamHeaders(sourceHeaders, body, sessionId = null) {
   return headers;
 }
 
-function requestUpstreamBuffer(runtime, method, url, headers, body = null) {
+function requestUpstreamBuffer(runtime, method, url, headers, body = null, pathOverride = null) {
   const upstreamUrl = new URL(runtime.upstreamUrl);
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -586,7 +587,7 @@ function requestUpstreamBuffer(runtime, method, url, headers, body = null) {
         hostname: upstreamUrl.hostname,
         port: Number(upstreamUrl.port || 80),
         method,
-        path: getUpstreamRequestPath(runtime, url),
+        path: pathOverride || getUpstreamRequestPath(runtime, url),
         headers,
         timeout: UPSTREAM_TIMEOUT_MS,
       },
@@ -736,8 +737,34 @@ async function handleProtectedSdkMcp(request, response, runtime, url, resource) 
   }
 }
 
+async function handleWebUnlock(request, response, runtime, url) {
+  if (!['GET', 'POST'].includes(request.method)) {
+    response.setHeader('Allow', 'GET, POST');
+    sendJson(response, 405, { error: 'method_not_allowed' }, { noStore: true });
+    return;
+  }
+  const expectedOrigin = new URL(runtime.config.issuer).origin;
+  if (request.method === 'POST' && request.headers.origin !== expectedOrigin) {
+    sendJson(response, 403, { error: 'invalid_origin' }, { noStore: true });
+    return;
+  }
+  const body = request.method === 'POST' ? await readBody(request, 4096) : null;
+  // This precise page route is the only public bridge to the Router's local
+  // browser-pairing UI. Never proxy arbitrary router paths from the internet.
+  const upstream = await requestUpstreamBuffer(
+    runtime, request.method, url,
+    buildUpstreamHeaders(request.headers, body), body,
+    '/web-unlock' + url.search,
+  );
+  sendUpstreamResponse(response, upstream);
+}
+
 async function handleRequest(request, response, runtime) {
   const url = new URL(request.url || '/', 'http://127.0.0.1');
+  if (url.pathname === WEB_UNLOCK_PATH) {
+    await handleWebUnlock(request, response, runtime, url);
+    return;
+  }
   if (request.method === 'OPTIONS') {
     setCors(response);
     response.statusCode = 204;

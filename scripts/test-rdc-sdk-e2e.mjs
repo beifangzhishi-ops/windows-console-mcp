@@ -144,6 +144,7 @@ async function verifySurface(client, { exerciseApproval = false } = {}) {
   for (const name of [
     'list_devices',
     'wcm_unlock',
+    'wcm_claim_web_unlock',
     'approval_status',
     'request_approval',
     'resolve_pending_action',
@@ -156,6 +157,11 @@ async function verifySurface(client, { exerciseApproval = false } = {}) {
     throw new Error('routed worker-tool schema is missing optional UUID approval_id.');
   }
   const requestApproval = tools.find((tool) => tool.name === 'request_approval');
+  const claimWebUnlock = tools.find((tool) => tool.name === 'wcm_claim_web_unlock');
+  if (claimWebUnlock?.inputSchema?.required?.length ||
+      Object.keys(claimWebUnlock?.inputSchema?.properties || {}).length) {
+    throw new Error('wcm_claim_web_unlock must take no arguments.');
+  }
   if (requestApproval?._meta?.['openai/outputTemplate'] !== APPROVAL_UI_URI) {
     throw new Error('request_approval outputTemplate mismatch.');
   }
@@ -375,6 +381,19 @@ async function verifySurface(client, { exerciseApproval = false } = {}) {
 }
 
 async function main() {
+  stage = 'owner web unlock page';
+  const ownerPage = await request('/rdc/unlock');
+  requireStatus(ownerPage, 200);
+  if (!ownerPage.text.includes('WCM 临时解锁') ||
+      ownerPage.response.headers.get('cache-control')?.includes('no-store') !== true) {
+    throw new Error('One-tap owner page is not served with no-store.');
+  }
+  const invalidOrigin = await request('/rdc/unlock', {
+    method: 'POST', headers: { Origin: 'https://invalid.example', 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'action=unlock',
+  });
+  requireStatus(invalidOrigin, 403);
+
   stage = 'removed alias routes';
   const removedAlias = await request('/rdc/mcp-ccm');
   requireStatus(removedAlias, 404);
@@ -431,6 +450,7 @@ async function main() {
   console.log('RDC SDK MCP E2E: PASS');
   console.log('router_sdk_streamable_http=PASS');
   console.log('sidecar_oauth_resource=PASS');
+  console.log('web_unlock_page_origin_gate=PASS');
   console.log('refresh_token_rotation=PASS');
   console.log('sidecar_sdk_session=PASS');
   console.log('removed_alias_routes=PASS');

@@ -50,8 +50,12 @@ const resolver = approvalTools.find((tool) => tool.name === 'resolve_pending_act
 assert.ok(statusTool && verifiedStatus && requestCard && resolver);
 assert.deepEqual(
   approvalTools.map((tool) => tool.name),
-  ['wcm_unlock', 'approval_status', 'get_approval_status', 'request_approval', 'resolve_pending_action'],
+  ['wcm_claim_web_unlock', 'wcm_unlock', 'approval_status', 'get_approval_status', 'request_approval', 'resolve_pending_action'],
 );
+const claimTool = approvalTools.find((tool) => tool.name === 'wcm_claim_web_unlock');
+assert.deepEqual(claimTool.inputSchema.required, []);
+assert.deepEqual(claimTool.inputSchema.properties, {});
+assert.match(unlockTool.description, /directly fall back to a normal approval card/u);
 assert.deepEqual(statusTool.inputSchema.required, ['approval_id']);
 assert.deepEqual(verifiedStatus.inputSchema.required, ['approval_id', 'approval_nonce']);
 assert.deepEqual(verifiedStatus._meta?.ui?.visibility, ['app']);

@@ -38,6 +38,7 @@ import { PendingActionManager } from './pending-action-manager.mjs';
 import { ApprovalReceiptStore } from './approval-receipt-store.mjs';
 import { TimedGrantManager } from './timed-grant-manager.mjs';
 import { WcmTotpManager } from './totp.mjs';
+import { WebUnlockManager } from './web-unlock.mjs';
 import {
   APPROVAL_UI_URI,
   approvalRouterTools,
@@ -100,6 +101,11 @@ const timedGrantManager = new TimedGrantManager({
   audit: approvalAudit,
 });
 const wcmTotpManager = new WcmTotpManager({ root: process.cwd() });
+const webUnlockManager = new WebUnlockManager({
+  verifyCode: (code) => wcmTotpManager.verify(code),
+  grants: timedGrantManager,
+  policy: () => refreshApprovalPolicy(),
+});
 const uuCliRunner = new UuCliRunner();
 let approvalPolicy = approvalPolicyStore.current();
 
@@ -116,6 +122,7 @@ function refreshApprovalPolicy() {
       source: refreshed.source,
     });
     timedGrantManager.clearAll('policy_changed');
+    webUnlockManager.invalidatePending();
     pendingActionManager.clearPendingAll('policy_changed');
     uuCliRunner.closeAll('policy_changed');
   }
@@ -171,12 +178,12 @@ function jsonRpcError(id, code, message) {
   return { jsonrpc: '2.0', id, error: { code, message } };
 }
 
-async function readBody(request) {
+async function readBody(request, maxBytes = MAX_BODY_BYTES) {
   const chunks = [];
   let size = 0;
   for await (const chunk of request) {
     size += chunk.length;
-    if (size > MAX_BODY_BYTES) throw new Error('Request body too large.');
+    if (size > maxBytes) throw new Error('Request body too large.');
     chunks.push(chunk);
   }
   return Buffer.concat(chunks).toString('utf8');
@@ -628,6 +635,24 @@ async function dispatchRoutedWorker({
 async function executeTool(payload, sourcePayload = null) {
   const toolName = payload?.params?.name;
 
+  if (toolName === 'wcm_claim_web_unlock') {
+    const grant = webUnlockManager.claim();
+    if (!grant) return structuredToolResult({
+      wall_time_seconds: 0,
+      classification: 'web_unlock_not_available',
+      output: 'No new owner-issued webpage grant is awaiting claim. Open the WCM unlock webpage and tap Temporarily unlock, then try again.',
+    }, { isError: true });
+    return structuredToolResult({
+      wall_time_seconds: 0,
+      classification: 'web_unlock_claimed',
+      approval_id: grant.approval_id,
+      grant_scope: 'full_wcm',
+      grant_effect: 'all_routed_tools_all_registered_devices',
+      ...grantFields(grant),
+      output: 'Owner webpage unlock claimed. Pass this approval_id to WCM worker tools and uuyc_cli until its expiration.',
+    });
+  }
+
   if (toolName === 'wcm_unlock') {
     const args = payload?.params?.arguments || {};
     const policy = refreshApprovalPolicy();
@@ -1014,7 +1039,7 @@ async function executeTool(payload, sourcePayload = null) {
   });
 }
 function sdkInstructions() {
-  return `Prefer CCM for ordinary work. Only use WCM when the user explicitly requests it. Every Desktop Commander worker tool requires an explicit deviceId and optionally accepts a Router-only approval_id. WCM approval mode is controlled locally. In both mode, use either a user-provided six-digit phone code with wcm_unlock or an approval card. In totp or both mode, call wcm_unlock with the user-provided code and optional duration_seconds (default 21600) to get an approval_id; never retrieve the TOTP setup secret yourself. In timed or both mode, omit approval_id on a routed tool call to freeze it and receive an approval_id; call request_approval with it to show an approval card. In totp-only mode, a missing approval_id fails closed without generating a card. Pass the active approval_id on every later routed WCM call, including UU CLI. WCM never auto-selects an active grant. Multiple IDs can coexist. In off mode, tools execute directly. Router-local restart_wcm is a no-approval Supervisor restart exception. list_devices shows aggregate status; approval_status is a point lookup. Default device: ${registry.defaultDeviceId}.\n\n${SPECIALIZED_CAPABILITIES}\n\n${WCM_ERROR_SEMANTICS}`;
+  return `Prefer CCM for ordinary work. Only use WCM when the user explicitly requests it. Every Desktop Commander worker tool requires an explicit deviceId and optionally accepts a Router-only approval_id. WCM approval mode is controlled locally. In both mode the owner can open the fixed WCM webpage and tap Temporarily unlock; afterward call wcm_claim_web_unlock with no arguments to receive that one-time, time-limited approval_id. If no web grant is pending, ask the owner to tap the button. Do not ask for an OTP in chat for web unlock. An approval card is also supported: omit approval_id on a routed call to freeze an action and then call request_approval. In totp or both mode, wcm_unlock can accept a user-provided code, but model-mediated codes may be blocked. If the host blocks the OTP tool call before WCM receives it, do NOT retry or ask for another code: in both mode immediately freeze the originally intended worker/UU action by calling it without approval_id, then call request_approval on the new pending ID to display a normal approval card; explain this fallback to the owner. This fallback must be performed by the assistant because WCM cannot observe intercepted calls. In totp-only mode, a missing approval_id fails closed without generating a card. Pass the active approval_id on every later routed WCM call, including UU CLI. WCM never auto-selects an active grant. Multiple IDs can coexist. In off mode, tools execute directly. Router-local restart_wcm is a no-approval Supervisor restart exception. list_devices shows aggregate status; approval_status is a point lookup. Default device: ${registry.defaultDeviceId}.\n\n${SPECIALIZED_CAPABILITIES}\n\n${WCM_ERROR_SEMANTICS}`;
 }
 
 function unwrapRoutedResult(message, fallback) {
@@ -1107,6 +1132,10 @@ async function handleSdkMcp(request, response) {
 
 async function handleRequest(request, response) {
   const url = new URL(request.url || '/', 'http://127.0.0.1');
+  if (url.pathname === '/web-unlock') {
+    await webUnlockManager.handleHttp(request, response, readBody);
+    return;
+  }
   if (request.method === 'OPTIONS') {
     response.statusCode = 204;
     response.end();
